@@ -1,7 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
+#include <memory>
 #include <string>
+#include <system_error>
+#include <utility>
 #include <vector>
 
 #include <QByteArray>
@@ -70,6 +74,46 @@ bool PublishEvent(transport::DdsNode& node, quint64 schema,
   return static_cast<bool>(node.Publish(std::move(message)));
 }
 
+bool PublishRaw(transport::DdsNode& node, const QByteArray& bytes) {
+  transport::Message message;
+  message.payload = bytes;
+  message.endpoint = transport::Endpoint::Topic(kEventTopic);
+  return static_cast<bool>(node.Publish(std::move(message)));
+}
+
+/// 慢快照服务：同一时刻只应观察到一条快照请求，用来证明客户端刷新临界区生效。
+class SlowSnapshotService final : public ddsrpc::ServiceBase {
+ public:
+  explicit SlowSnapshotService(transport::DdsNode& node)
+      : ddsrpc::ServiceBase(
+            node, ddsrpc::ServiceConfig{"echo", kEventTopic,
+                                        test_support::kEchoSchema}) {}
+
+  std::atomic<int> in_flight{0};
+  std::atomic<int> max_in_flight{0};
+
+ protected:
+  ddsrpc::OperationResult HandleOperation(quint32, QDataStream&) override {
+    return ddsrpc::OperationResult::Failure(
+        ddsrpc::make_error_code(ddsrpc::RpcErrc::kInvalidArgument));
+  }
+
+  ddsrpc::OperationResult BuildPropertySnapshot() override {
+    const int current = in_flight.fetch_add(1) + 1;
+    int observed = max_in_flight.load();
+    while (current > observed &&
+           !max_in_flight.compare_exchange_weak(observed, current)) {
+    }
+    Coro::msleep(50);
+    in_flight.fetch_sub(1);
+
+    QByteArray payload;
+    QDataStream out(&payload, QIODevice::WriteOnly);
+    out << quint32(0);
+    return ddsrpc::OperationResult::Success(payload);
+  }
+};
+
 class BareClient : public ddsrpc::ClientBase {
  public:
   using ddsrpc::ClientBase::ClientBase;
@@ -97,6 +141,10 @@ class BareClient : public ddsrpc::ClientBase {
   int sync_failed_count = 0;
   QStringList sync_failures;
   std::vector<bool> ready_states;
+  bool fail_snapshot = false;
+  bool stop_from_dispatch = false;
+  bool stop_attempted = false;
+  std::error_code stop_attempt_error;
 
  protected:
   void ResetPropertiesForResync() override { ++reset_count; }
@@ -107,6 +155,9 @@ class BareClient : public ddsrpc::ClientBase {
     if (in.status() != QDataStream::Ok) {
       return ddsrpc::make_error_code(ddsrpc::RpcErrc::kDecode);
     }
+    if (fail_snapshot) {
+      return ddsrpc::make_error_code(ddsrpc::RpcErrc::kProtocol);
+    }
     EXPECT_EQ(count, 0u);
     return {};
   }
@@ -114,6 +165,10 @@ class BareClient : public ddsrpc::ClientBase {
   void DispatchSignal(quint32 event_id, QDataStream&) override {
     ++signal_count;
     last_signal_id = event_id;
+    if (stop_from_dispatch) {
+      stop_attempted = true;
+      stop_attempt_error = StopEventLoop().error();
+    }
   }
 
   void DispatchProperty(quint32 event_id, quint64 revision,
@@ -202,6 +257,12 @@ TEST(ClientBaseTest, LinkLossClearsReadyAndNextUpResyncs) {
   EXPECT_EQ(env.bare.reset_count, 2);
   ASSERT_EQ(env.bare.ready_states.size(), 3u);
   EXPECT_TRUE(env.bare.ready_states.back());
+
+  // Repeated Up while already ready is a no-op: no reset, no duplicate signal.
+  ASSERT_TRUE(env.bare.Sync());
+  EXPECT_TRUE(env.bare.ready());
+  EXPECT_EQ(env.bare.reset_count, 2);
+  EXPECT_EQ(env.bare.ready_states.size(), 3u);
 
   const auto reply = env.bare.Echo(EncodeString(QStringLiteral("again")));
   ASSERT_TRUE(reply) << reply.error().message();
@@ -377,6 +438,196 @@ TEST(ClientBaseTest, DispatchesEventsAndStopsEventLoop) {
   Coro::msleep(50);
   EXPECT_EQ(env.bare.signal_count, 1);
 
+  EXPECT_TRUE(env.bare.Shutdown());
+  EXPECT_TRUE(env.service.Stop());
+}
+
+TEST(ClientBaseTest, DownAfterStandaloneRefreshClearsReady) {
+  EchoEnv env;
+  ASSERT_TRUE(StartEchoEnv(env));
+
+  // refreshProperties() can succeed even though no Up was ever observed.
+  ASSERT_TRUE(env.bare.Refresh());
+  EXPECT_TRUE(env.bare.ready());
+  ASSERT_EQ(env.bare.ready_states.size(), 1u);
+  EXPECT_TRUE(env.bare.ready_states[0]);
+
+  // Non-Up must clear ready unconditionally, regardless of link_up_.
+  ASSERT_TRUE(env.bare.Down());
+  EXPECT_FALSE(env.bare.ready());
+  ASSERT_EQ(env.bare.ready_states.size(), 2u);
+  EXPECT_FALSE(env.bare.ready_states[1]);
+
+  ASSERT_TRUE(env.bare.Down());
+  ASSERT_EQ(env.bare.ready_states.size(), 2u);
+
+  EXPECT_TRUE(env.bare.Shutdown());
+  EXPECT_TRUE(env.service.Stop());
+}
+
+TEST(ClientBaseTest, SerializesConcurrentSnapshotRefreshes) {
+  test_support::FakeDdsFixture fixture;
+  test_support::Host server(fixture, "server");
+  test_support::Host client(fixture, "client");
+  SlowSnapshotService service(server.node());
+  BareClient bare(client.node(), EchoConfig());
+
+  ASSERT_TRUE(service.Prepare());
+  ASSERT_TRUE(bare.Prepare());
+  ASSERT_TRUE(server.start_node());
+  ASSERT_TRUE(client.start_node());
+  ASSERT_TRUE(service.Start());
+  ASSERT_TRUE(test_support::WaitLinkUp(client.transport()));
+
+  auto first = Coro::makeTask([&] { return bare.Refresh(); });
+  auto second = Coro::makeTask([&] { return bare.Refresh(); });
+  auto first_result = first.get();
+  auto second_result = second.get();
+  ASSERT_TRUE(first_result) << first_result.error().message();
+  ASSERT_TRUE(second_result) << second_result.error().message();
+  EXPECT_TRUE(bare.ready());
+  EXPECT_EQ(bare.reset_count, 2);
+  EXPECT_EQ(service.max_in_flight.load(), 1);
+
+  EXPECT_TRUE(bare.Shutdown());
+  EXPECT_TRUE(service.Stop());
+}
+
+TEST(ClientBaseTest, RejectsReplyOpMismatch) {
+  test_support::FakeDdsFixture fixture;
+  test_support::Host server(fixture, "server");
+  test_support::Host client(fixture, "client");
+  BareClient bare(client.node(), EchoConfig());
+
+  ASSERT_TRUE(bare.Prepare());
+  ASSERT_TRUE(server.node().RegisterServices({"echo"}));
+  ASSERT_TRUE(server.start_node());
+  ASSERT_TRUE(client.start_node());
+  ASSERT_TRUE(test_support::WaitLinkUp(client.transport()));
+
+  auto served = server.node().ServeRequests("echo");
+  ASSERT_TRUE(served) << served.error().message();
+  auto ticket = std::make_shared<transport::DdsNode::Ticket>(
+      std::move(served).value());
+  auto responder = Coro::makeTask([ticket, &server] {
+    auto request = ticket->Wait();
+    if (!request) return;
+    QDataStream in(request.value().payload);
+    ddsrpc::wire::Begin(in);
+    const auto header = ddsrpc::wire::ReadRequestHeader(in);
+    if (!header) return;
+
+    QByteArray bytes;
+    QDataStream out(&bytes, QIODevice::WriteOnly);
+    ddsrpc::wire::Begin(out);
+    ddsrpc::wire::WriteReplyHeader(out, test_support::kEchoSchema,
+                                   header.value().op + 1, true);
+    transport::Message reply;
+    reply.payload = bytes;
+    (void)server.node().Reply(request.value(), std::move(reply));
+  });
+
+  const auto failed = bare.Echo(EncodeString(QStringLiteral("x")));
+  ASSERT_FALSE(failed);
+  EXPECT_EQ(failed.error(),
+            ddsrpc::make_error_code(ddsrpc::RpcErrc::kProtocol));
+  EXPECT_TRUE(bare.lastErrorText().contains(QStringLiteral("op mismatch")))
+      << bare.lastErrorText().toStdString();
+
+  auto responder_result = responder.get();
+  EXPECT_TRUE(responder_result);
+  EXPECT_TRUE(bare.Shutdown());
+}
+
+TEST(ClientBaseTest, SnapshotApplyFailureIsReportedAndBlocks) {
+  EchoEnv env;
+  ASSERT_TRUE(StartEchoEnv(env));
+  env.bare.fail_snapshot = true;
+
+  const auto first = env.bare.Sync();
+  ASSERT_FALSE(first);
+  EXPECT_EQ(first.error(), ddsrpc::make_error_code(ddsrpc::RpcErrc::kProtocol));
+  EXPECT_FALSE(env.bare.ready());
+  EXPECT_EQ(env.bare.reset_count, 1);
+  EXPECT_EQ(env.bare.sync_failed_count, 1);
+  EXPECT_TRUE(env.bare.lastErrorText().contains(QStringLiteral("snapshot")))
+      << env.bare.lastErrorText().toStdString();
+
+  // A malformed snapshot blocks automatic retries until an explicit refresh.
+  ASSERT_TRUE(env.bare.Sync());
+  EXPECT_EQ(env.bare.reset_count, 1);
+  EXPECT_EQ(env.bare.sync_failed_count, 1);
+
+  const auto refreshed = env.bare.Refresh();
+  ASSERT_FALSE(refreshed);
+  EXPECT_EQ(env.bare.reset_count, 2);
+  EXPECT_EQ(env.bare.sync_failed_count, 2);
+
+  EXPECT_TRUE(env.bare.Shutdown());
+  EXPECT_TRUE(env.service.Stop());
+}
+
+TEST(ClientBaseTest, RejectsMalformedEventHeader) {
+  EchoEnv env;
+  ASSERT_TRUE(StartEchoEnv(env));
+  ASSERT_TRUE(env.bare.StartEventLoop());
+
+  ASSERT_TRUE(PublishRaw(env.server.node(), QByteArray("not-a-wire-event")));
+  ASSERT_TRUE(
+      test_support::PumpUntil([&] { return env.bare.sync_failed_count == 1; }));
+  EXPECT_EQ(env.bare.signal_count, 0);
+  EXPECT_TRUE(env.bare.lastErrorText().contains(QStringLiteral("event header")))
+      << env.bare.lastErrorText().toStdString();
+
+  // The loop stopped: a subsequent well-formed event is not dispatched.
+  ASSERT_TRUE(PublishEvent(env.server.node(), test_support::kEchoSchema,
+                           ddsrpc::wire::EventKind::kSignal, 1, 1));
+  Coro::msleep(50);
+  EXPECT_EQ(env.bare.signal_count, 0);
+
+  EXPECT_TRUE(env.bare.StopEventLoop());
+  EXPECT_TRUE(env.bare.Shutdown());
+  EXPECT_TRUE(env.service.Stop());
+}
+
+TEST(ClientBaseTest, RejectsUnknownEventKind) {
+  EchoEnv env;
+  ASSERT_TRUE(StartEchoEnv(env));
+  ASSERT_TRUE(env.bare.StartEventLoop());
+
+  ASSERT_TRUE(PublishEvent(env.server.node(), test_support::kEchoSchema,
+                           static_cast<ddsrpc::wire::EventKind>(99), 1, 1));
+  ASSERT_TRUE(
+      test_support::PumpUntil([&] { return env.bare.sync_failed_count == 1; }));
+  EXPECT_EQ(env.bare.signal_count, 0);
+  EXPECT_TRUE(env.bare.lastErrorText().contains(QStringLiteral("unknown event")))
+      << env.bare.lastErrorText().toStdString();
+
+  EXPECT_TRUE(env.bare.StopEventLoop());
+  EXPECT_TRUE(env.bare.Shutdown());
+  EXPECT_TRUE(env.service.Stop());
+}
+
+TEST(ClientBaseTest, RejectsStopFromEventDispatch) {
+  EchoEnv env;
+  ASSERT_TRUE(StartEchoEnv(env));
+  ASSERT_TRUE(env.bare.StartEventLoop());
+
+  env.bare.stop_from_dispatch = true;
+  ASSERT_TRUE(PublishEvent(env.server.node(), test_support::kEchoSchema,
+                           ddsrpc::wire::EventKind::kSignal, 7, 1));
+  ASSERT_TRUE(test_support::PumpUntil([&] { return env.bare.stop_attempted; }));
+  EXPECT_EQ(env.bare.stop_attempt_error,
+            ddsrpc::make_error_code(ddsrpc::RpcErrc::kInvalidState));
+  EXPECT_EQ(env.bare.signal_count, 1);
+
+  // The rejected stop left the event loop alive and able to dispatch again.
+  env.bare.stop_from_dispatch = false;
+  ASSERT_TRUE(PublishEvent(env.server.node(), test_support::kEchoSchema,
+                           ddsrpc::wire::EventKind::kSignal, 8, 2));
+  ASSERT_TRUE(test_support::PumpUntil([&] { return env.bare.signal_count == 2; }));
+
+  EXPECT_TRUE(env.bare.StopEventLoop());
   EXPECT_TRUE(env.bare.Shutdown());
   EXPECT_TRUE(env.service.Stop());
 }

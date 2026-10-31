@@ -3,10 +3,13 @@
 #include <QByteArray>
 #include <QDataStream>
 #include <QString>
+#include <atomic>
 #include <chrono>
+#include <memory>
 #include <utility>
 #include <vector>
 
+#include "await/awaitable.hpp"
 #include "ddsrpc/wire.h"
 #include "task/fibertask.h"
 #include "tests/support/echo_service.hpp"
@@ -53,6 +56,58 @@ Coro::Result<QString> EchoOnce(transport::DdsNode& node, const QString& text) {
   in >> echoed;
   return echoed;
 }
+
+Coro::Result<void> RequestBlockedService(transport::DdsNode& node) {
+  QByteArray payload;
+  QDataStream out(&payload, QIODevice::WriteOnly);
+  ddsrpc::wire::Begin(out);
+  ddsrpc::wire::WriteRequestHeader(out, test_support::kEchoSchema, 1);
+  if (out.status() != QDataStream::Ok) {
+    return ddsrpc::make_error_code(ddsrpc::RpcErrc::kEncode);
+  }
+
+  transport::Message request;
+  request.payload = payload;
+  request.endpoint = transport::Endpoint::Service("blocked");
+  auto reply = node.RequestForResultDirect(
+      std::move(request), transport::RetryPolicy{3000ms, 1});
+  if (!reply) return reply.error();
+  return {};
+}
+
+class BlockingService final : public ddsrpc::ServiceBase {
+ public:
+  explicit BlockingService(transport::DdsNode& node)
+      : ddsrpc::ServiceBase(
+            node, ddsrpc::ServiceConfig{"blocked", "blocked.events",
+                                        test_support::kEchoSchema}) {}
+
+  std::shared_ptr<Coro::Awaitable<void>> gate =
+      std::make_shared<Coro::Awaitable<void>>();
+  std::atomic_bool handler_started{false};
+  std::atomic_bool interruption_observed{false};
+  std::atomic_bool handler_finished{false};
+
+ protected:
+  ddsrpc::OperationResult HandleOperation(quint32, QDataStream&) override {
+    handler_started.store(true);
+    auto waited = gate->await();
+    if (!waited) {
+      interruption_observed.store(true);
+      handler_finished.store(true);
+      return ddsrpc::OperationResult::Failure(waited.error());
+    }
+    handler_finished.store(true);
+    return ddsrpc::OperationResult::Success();
+  }
+
+  ddsrpc::OperationResult BuildPropertySnapshot() override {
+    QByteArray payload;
+    QDataStream out(&payload, QIODevice::WriteOnly);
+    out << quint32(0);
+    return ddsrpc::OperationResult::Success(payload);
+  }
+};
 
 }  // namespace
 
@@ -128,4 +183,36 @@ TEST(ServiceBaseTest, ServesConcurrentRequests) {
   }
 
   EXPECT_TRUE(service.Stop());
+}
+
+TEST(ServiceBaseTest, StopCancelsInFlightHandlerAndJoins) {
+  test_support::FakeDdsFixture fixture;
+  test_support::Host server(fixture, "server");
+  test_support::Host client(fixture, "client");
+  BlockingService service(server.node());
+
+  ASSERT_TRUE(service.Prepare());
+  ASSERT_TRUE(client.node().RegisterClients({"blocked"}));
+  ASSERT_TRUE(server.start_node());
+  ASSERT_TRUE(client.start_node());
+  ASSERT_TRUE(service.Start());
+  ASSERT_TRUE(test_support::WaitLinkUp(client.transport()));
+
+  auto call = Coro::makeTask(
+      [&node = client.node()] { return RequestBlockedService(node); });
+  ASSERT_TRUE(
+      test_support::PumpUntil([&] { return service.handler_started.load(); }));
+
+  const auto stopped_at = std::chrono::steady_clock::now();
+  ASSERT_TRUE(service.Stop());
+  const auto elapsed = std::chrono::steady_clock::now() - stopped_at;
+
+  EXPECT_LT(elapsed, 1000ms);
+  EXPECT_FALSE(service.running());
+  EXPECT_TRUE(service.interruption_observed.load());
+  EXPECT_TRUE(service.handler_finished.load());
+  EXPECT_TRUE(service.Stop());
+
+  (void)call.cancel();
+  (void)call.get();
 }

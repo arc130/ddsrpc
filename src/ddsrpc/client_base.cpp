@@ -1,15 +1,37 @@
 #include "ddsrpc/client_base.h"
 
 #include <exception>
+#include <mutex>
 #include <system_error>
 #include <utility>
 
+#include <QDebug>
 #include <QIODevice>
+
+#include <boost/fiber/operations.hpp>
 
 namespace ddsrpc {
 namespace {
 
 std::error_code RpcError(RpcErrc error) { return make_error_code(error); }
+
+/// 标记事件回调所属 fiber，使同一 fiber 内的 StopEvents() 能拒绝自 join；
+/// 其它 fiber（例如链路监控）仍可正常停止事件。
+class ScopedEventDispatch {
+ public:
+  ScopedEventDispatch(bool* active, boost::fibers::fiber::id* dispatch_fiber)
+      : active_(active) {
+    *active_ = true;
+    *dispatch_fiber = boost::this_fiber::get_id();
+  }
+  ~ScopedEventDispatch() { *active_ = false; }
+
+  ScopedEventDispatch(const ScopedEventDispatch&) = delete;
+  ScopedEventDispatch& operator=(const ScopedEventDispatch&) = delete;
+
+ private:
+  bool* active_;
+};
 
 bool IsSyncBlockingError(const std::error_code& error) {
   return error == make_error_code(RpcErrc::kSchemaMismatch) ||
@@ -27,9 +49,15 @@ ClientBase::ClientBase(transport::DdsNode& node, ClientConfig config)
     : node_(node), config_(std::move(config)) {}
 
 ClientBase::~ClientBase() {
-  if (running_) {
-    (void)StopEndpoint();
-  }
+  // 生成 Client 必须先在其派生析构函数体里 stop()。这里既不能发射纯虚信号，
+  // 也不能 join 仍可能回调派生对象的 fiber；只做诊断，不做清理。
+  const bool active = running_ || events_.has_value() || event_task_ != nullptr;
+  if (!active) return;
+
+  qWarning("ddsrpc::ClientBase destroyed while its event endpoint is active; "
+           "call stop() on the derived client before destruction");
+  Q_ASSERT_X(!active, "ClientBase::~ClientBase",
+             "generated client must call stop() before base destruction");
 }
 
 Coro::Result<void> ClientBase::Prepare() {
@@ -71,6 +99,14 @@ Coro::Result<void> ClientBase::StartEvents() {
 }
 
 Coro::Result<void> ClientBase::StopEvents() {
+  if (in_event_dispatch_ &&
+      event_dispatch_fiber_ == boost::this_fiber::get_id()) {
+    const QString text =
+        QStringLiteral("stop() called from an event-dispatch callback; "
+                       "defer it until the callback returns");
+    SetLastErrorText(text);
+    return RpcError(RpcErrc::kInvalidState);
+  }
   if (!running_ && !events_ && !event_task_) return {};
   running_ = false;
 
@@ -88,29 +124,52 @@ Coro::Result<void> ClientBase::StopEvents() {
 
 Coro::Result<void> ClientBase::HandleLinkState(transport::LinkState state) {
   if (state != transport::LinkState::kUp) {
-    if (link_up_) {
-      link_up_ = false;
-      sync_blocked_ = false;
-      SetReady(false);
-    }
+    std::unique_lock<boost::fibers::mutex> lock(refresh_mutex_);
+    link_up_ = false;
+    sync_blocked_ = false;
+    // 即使此前没有观察到 Up（例如显式 refreshProperties() 已置 ready），
+    // Down 也必须撤销 ready。
+    SetReady(false);
     return {};
   }
 
-  if (!link_up_) {
-    sync_blocked_ = false;
-    auto renewed = RenewEvents();
-    if (!renewed) return renewed.error();
-    link_up_ = true;
-    SetReady(false);
-    ResetPropertiesForResync();
+  bool rising = false;
+  {
+    std::unique_lock<boost::fibers::mutex> lock(refresh_mutex_);
+    rising = !link_up_;
+    if (rising) {
+      sync_blocked_ = false;
+    } else if (!ready_.load() && !sync_blocked_) {
+      return SyncOnce();
+    } else {
+      return {};
+    }
   }
 
+  // RenewEvents() 会 join 事件 fiber；事件回调可以合法地调用 refreshProperties()，
+  // 因此不能在持有 refresh_mutex_ 时做 join，否则会与回调争锁而互等。
+  auto renewed = RenewEvents();
+  if (!renewed) {
+    std::unique_lock<boost::fibers::mutex> lock(refresh_mutex_);
+    link_up_ = false;
+    SetReady(false);
+    return renewed.error();
+  }
+
+  std::unique_lock<boost::fibers::mutex> lock(refresh_mutex_);
+  link_up_ = true;
+  sync_blocked_ = false;
+  SetReady(false);
+  ResetPropertiesForResync();
   if (!ready_.load() && !sync_blocked_) return SyncOnce();
   return {};
 }
 
 Coro::Result<void> ClientBase::StopEndpoint() {
+  // 先停止并 join 事件 fiber，再取刷新锁：回调中的 refreshProperties() 可能在等
+  // refresh_mutex_，持锁 join 会形成死锁。
   auto stopped = StopEvents();
+  std::unique_lock<boost::fibers::mutex> lock(refresh_mutex_);
   SetReady(false);
   link_up_ = false;
   sync_blocked_ = false;
@@ -153,6 +212,12 @@ Coro::Result<QByteArray> ClientBase::CallWithRetry(
     SetLastErrorText(text);
     return RpcError(RpcErrc::kSchemaMismatch);
   }
+  if (header.value().op != op) {
+    SetLastErrorText(QStringLiteral("reply op mismatch: requested %1, got %2")
+                         .arg(op)
+                         .arg(header.value().op));
+    return RpcError(RpcErrc::kProtocol);
+  }
   if (!header.value().ok) {
     const auto remote = wire::ReadError(in);
     if (!remote) {
@@ -178,6 +243,7 @@ Coro::Result<QByteArray> ClientBase::CallWithRetry(
 }
 
 Coro::Result<void> ClientBase::refreshProperties() {
+  std::unique_lock<boost::fibers::mutex> lock(refresh_mutex_);
   sync_blocked_ = false;
   ResetPropertiesForResync();
   return SyncOnce();
@@ -200,12 +266,16 @@ void ClientBase::EventLoop() {
     if (!header) {
       const QString text =
           ErrorText(QStringLiteral("invalid event header"), header.error());
+      ScopedEventDispatch dispatching(&in_event_dispatch_,
+                                      &event_dispatch_fiber_);
       SetLastErrorText(text);
       EmitSyncFailed(text);
       return;
     }
     if (header.value().schema != config_.schema_hash) {
       const QString text = QStringLiteral("event schema mismatch");
+      ScopedEventDispatch dispatching(&in_event_dispatch_,
+                                      &event_dispatch_fiber_);
       SetLastErrorText(text);
       EmitSyncFailed(text);
       return;
@@ -213,6 +283,8 @@ void ClientBase::EventLoop() {
 
     bool stop = false;
     try {
+      ScopedEventDispatch dispatching(&in_event_dispatch_,
+                                      &event_dispatch_fiber_);
       switch (header.value().kind) {
         case wire::EventKind::kSignal:
           DispatchSignal(header.value().id, in);
@@ -266,8 +338,16 @@ Coro::Result<void> ClientBase::SyncOnce() {
   wire::Begin(in);
   auto applied = ApplyPropertySnapshot(in);
   if (!applied) {
+    const std::error_code error = applied.error();
+    const QString text =
+        ErrorText(QStringLiteral("property snapshot apply failed"), error);
+    SetLastErrorText(text);
+    // 快照无法应用是协议/语义错误；自动重试只会重复同一份坏快照，按同步阻塞
+    // 处理，等待下一次链路 Up 或显式 refreshProperties()。
+    sync_blocked_ = true;
+    EmitSyncFailed(text);
     SetReady(false);
-    return applied.error();
+    return error;
   }
 
   SetReady(true);
