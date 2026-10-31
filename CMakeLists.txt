@@ -37,6 +37,7 @@ add_library(ddsrpc_runtime STATIC
   src/ddsrpc/wire.cpp
   src/ddsrpc/task_group.cpp
   src/ddsrpc/service_base.cpp
+  src/ddsrpc/client_base.cpp
 )
 add_library(ddsrpc::runtime ALIAS ddsrpc_runtime)
 target_include_directories(ddsrpc_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
