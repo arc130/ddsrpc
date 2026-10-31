@@ -640,7 +640,8 @@ third_party/Transport   -> 1c79cd5 (0.6.0)
 - `ddsrpc_runtime`：静态运行时库，别名 `ddsrpc::runtime`；
 - `ddsrpcgen_tests`；
 - `ddsrpc_runtime_tests`；
-- CMake 示例 `hello_server` 与 `hello_client` 两个可执行文件（fake provider 下同机成对运行）。
+- CMake 示例 `hello`：单进程内创建共享 FakeDdsProvider 总线上的 service/client 两个 DdsNode，演示先启动 client、再启动 service 后的自动握手/属性刷新和 RPC/信号。
+  - FakeDdsProvider 是进程内总线，因此不提供跨进程的 hello_server/hello_client；跨进程版本需后续使用 Fast DDS。
 
 接入函数：
 
