@@ -211,6 +211,63 @@ ddsrpcgen --role types|service|client|all
 - 生成的 class/类型名必须在目标 namespace 内唯一；`Options` 与生成的 Service/Client 成员名同属保留名空间。
 - 生成 class 只借用 `transport::DdsNode&`，不拥有 transport/node。
 
+### 4.3 生成器实现
+
+生成器是 C++17 + Qt Core 的单体命令行程序，采用手写递归下降解析器，不依赖 bison/ANTLR。
+
+```text
+CLI
+ → IMPORT 递归加载
+ → 手写 lexer
+ → 递归下降 parser
+ → AST
+ → 语义分析 / 类型解析 / id 与 schema 计算
+ → types/service/client emitters
+ → 原子写文件 + depfile
+```
+
+**Lexer**
+
+- 手写扫描器，token 含标识符、整数、字符串、单行 `#` 指令、标点和文件结束符；
+- 跳过 `//` 与 `/* ... */` 注释，保留文件/行/列；
+- 记录 token 的源码偏移，用于捕获 PROP 默认表达式、SLOT 参数等 C++ 片段；
+- `IMPORT`、`POD`、`ENUM`、`class`、`PROP`、`SIGNAL`、`SLOT` 是大小写敏感关键字；不支持的 `MODEL`、`CLASS`、`FLAG`、`USE_ENUM` 也识别并给出定向错误。
+
+**Parser**
+
+- 递归下降，单次解析出 AST；语法错误立即失败，不生成半成品。
+- 顶层：`IMPORT`、C++ 指令、`POD`、`ENUM`、`class`。
+- class 内：`PROP`、`SIGNAL`、`SLOT`、`ENUM`。
+- 独立 `parseType()` 递归处理限定名与模板，如 `QMap<QString, QList<Point>>`、`const T&`。
+- `parseParams()` 复用 `parseType()`，支持未命名参数并生成 `arg0..`。
+- `SLOT` 先定位函数参数左括号：括号前最后一个标识符是函数名，其余 token 组成返回类型（空则为 `void`）。
+- `PROP` 先解析 type/name；`=` 后的内容按源码区间保存为默认表达式，末尾的已知修饰符单独提取。
+- 未支持构造、重复/非法标识符等由 parser 或语义层报告带 `file:line:col` 的诊断。
+
+**AST 与语义分析**
+
+- AST 包含 `SourceFile`、`ImportDecl`、`PodDecl`、`EnumDecl`、`ClassDecl`、`PropDecl`、`SignalDecl`、`SlotDecl`、`TypeRef`、`Param`、`Directive`。
+- 语义层建立全局 POD/ENUM 表与 class 成员表，解析类内枚举和外部 C++ 类型，校验保留名/重名/修饰符。
+- 为 SLOT、属性 setter、SIGNAL 分配 op/event id；对 POD 做拓扑排序并检测循环。
+- 每个 IDL 的 schema hash 由规范化 AST（声明顺序、类型、修饰符、默认值）和 IMPORT 图中的类型声明计算；使用 SHA-256 截断为 64 位。
+
+**代码发射**
+
+- 简单 `CodeWriter`（缩进、命名空间、头文件保护、参数/类型渲染）加三个 emitter：`TypesEmitter`、`ServiceEmitter`、`ClientEmitter`；不使用模板引擎。
+- Emitter 只消费语义分析后的模型，不回读源文本。
+- 生成内容固定顺序、无时间戳/绝对路径；相同输入产生字节级相同输出。
+- 所有文件先写临时文件，全部成功后再替换目标文件；失败不留部分生成物。
+- depfile 由生成器输出，列出所有被 IMPORT 的 IDL。
+- 生成的 Client 链路监控循环直接调用 `transport_.CurrentLinkState()`，不额外包一层连接状态抽象；后续 SDK 变化时直接修改生成代码。
+
+**CMake 与生成器的分工**
+
+- CMake configure 阶段只做最小 IMPORT 图扫描，用于确定输出文件与 moc 输入；
+- build 阶段调用一次生成器完成完整解析、语义检查和代码生成；
+- CMake 扫描与生成器共用相对路径 + `INCLUDE_DIRS` 规则；两者不一致时以生成器的构建期错误为准。
+
+手写递归下降的原因：当前语法规模小，真正复杂的是嵌入的 C++ 类型/默认值片段和诊断，而不是上下文无关语法本身；手写方案零额外工具链依赖，且生成代码和解析代码都便于后续直接修改。
+
 ## 5. 运行时架构
 
 ### 5.1 组件
