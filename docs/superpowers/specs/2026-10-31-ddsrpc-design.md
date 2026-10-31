@@ -5,7 +5,7 @@
 - 依赖基线：
   - `Ste7an-cs/Transport` `1c79cd5`（0.6.0）
   - `Ste7an-cs/AsyncTask` `d231d64`（当前 master，覆盖 Transport 记录的旧 pin `6f4225`）
-- 验收环境：Ubuntu 20.04 WSL + Qt 5.12 + FakeDdsProvider
+- 验收环境：Ubuntu 20.04 WSL + Qt 5.12 + Boost >= 1.89 + FakeDdsProvider
 
 ## 1. 背景与目标
 
@@ -629,8 +629,8 @@ third_party/Transport   -> 1c79cd5 (0.6.0)
 - 根工程锁定以上 commit。
 - 不初始化 Transport 自带的旧 AsyncTask 子模块；CMake 将 `ASYNCTASK_DIR` 指向根 `third_party/AsyncTask`。
 - CMake 提供 `DDSRPC_TRANSPORT_DIR`、`DDSRPC_ASYNCTASK_DIR` 覆盖变量，缺省指向上述子模块；子模块缺失时 configure 直接给出明确错误。
-- 需在 WSL/Ubuntu 安装 `libqt5serialport5-dev`；Boost 1.72 已安装在 `/usr/local`，Qt 5.12.8、CMake 3.16 可用。
-- 两个显式兼容性风险，实现阶段先做 spike 验证：Transport 0.6.0 上游锁的是 AsyncTask `6f4225`，本工程改用 `d231d64`；AsyncTask README 声称 Boost 1.89，而当前 WSL 为 1.72。若编译失败，先报告具体缺项（升级 AsyncTask/Boost），不静默回退。
+- 需在 WSL/Ubuntu 安装 `libqt5serialport5-dev`。Boost >= 1.89.0 必须安装到 `/usr/local`（AsyncTask `d231d64` 使用 `boost/fiber/waker.hpp`，1.72 不满足）；Qt 5.12.8、CMake 3.16 可用。
+- 显式兼容性风险：Transport 0.6.0 上游锁的是 AsyncTask `6f4225`，本工程改用 `d231d64` 并配 Boost 1.89；Task 1 的 spike 是门禁，失败即停止，不静默回退。
 
 ### 11.2 CMake
 
