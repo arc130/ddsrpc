@@ -95,6 +95,8 @@ Coro::Result<void> ClientBase::StartEvents() {
   event_task_ = std::make_shared<Coro::FiberTask<void>>(
       Coro::makeTask([this] { EventLoop(); }));
   running_ = true;
+  // 再次 start 后恢复显式 refresh；StopEndpoint 设置的停止栅栏只持续到重启。
+  stopped_ = false;
   return {};
 }
 
@@ -123,26 +125,30 @@ Coro::Result<void> ClientBase::StopEvents() {
 }
 
 Coro::Result<void> ClientBase::HandleLinkState(transport::LinkState state) {
+  PendingNotifications pending;
   if (state != transport::LinkState::kUp) {
-    std::unique_lock<boost::fibers::mutex> lock(refresh_mutex_);
-    link_up_ = false;
-    sync_blocked_ = false;
-    // 即使此前没有观察到 Up（例如显式 refreshProperties() 已置 ready），
-    // Down 也必须撤销 ready。
-    SetReady(false);
+    {
+      std::unique_lock<boost::fibers::mutex> lock(refresh_mutex_);
+      link_up_ = false;
+      sync_blocked_ = false;
+      // 即使此前没有观察到 Up（例如显式 refreshProperties() 已置 ready），
+      // Down 也必须撤销 ready。
+      SetReadyLocked(false, pending);
+    }
+    EmitNotifications(pending);
     return {};
   }
 
-  bool rising = false;
   {
     std::unique_lock<boost::fibers::mutex> lock(refresh_mutex_);
-    rising = !link_up_;
-    if (rising) {
+    if (!link_up_) {
       sync_blocked_ = false;
-    } else if (!ready_.load() && !sync_blocked_) {
-      return SyncOnce();
     } else {
-      return {};
+      Coro::Result<void> result;
+      if (!ready_.load() && !sync_blocked_) result = SyncOnce(pending);
+      lock.unlock();
+      EmitNotifications(pending);
+      return result;
     }
   }
 
@@ -150,30 +156,48 @@ Coro::Result<void> ClientBase::HandleLinkState(transport::LinkState state) {
   // 因此不能在持有 refresh_mutex_ 时做 join，否则会与回调争锁而互等。
   auto renewed = RenewEvents();
   if (!renewed) {
-    std::unique_lock<boost::fibers::mutex> lock(refresh_mutex_);
-    link_up_ = false;
-    SetReady(false);
+    {
+      std::unique_lock<boost::fibers::mutex> lock(refresh_mutex_);
+      link_up_ = false;
+      SetReadyLocked(false, pending);
+    }
+    EmitNotifications(pending);
     return renewed.error();
   }
 
-  std::unique_lock<boost::fibers::mutex> lock(refresh_mutex_);
-  link_up_ = true;
-  sync_blocked_ = false;
-  SetReady(false);
-  ResetPropertiesForResync();
-  if (!ready_.load() && !sync_blocked_) return SyncOnce();
-  return {};
+  Coro::Result<void> result;
+  {
+    std::unique_lock<boost::fibers::mutex> lock(refresh_mutex_);
+    link_up_ = true;
+    sync_blocked_ = false;
+    SetReadyLocked(false, pending);
+    ResetPropertiesForResync();
+    if (!ready_.load() && !sync_blocked_) result = SyncOnce(pending);
+  }
+  EmitNotifications(pending);
+  return result;
 }
 
 Coro::Result<void> ClientBase::StopEndpoint() {
   // 先停止并 join 事件 fiber，再取刷新锁：回调中的 refreshProperties() 可能在等
   // refresh_mutex_，持锁 join 会形成死锁。
   auto stopped = StopEvents();
-  std::unique_lock<boost::fibers::mutex> lock(refresh_mutex_);
-  SetReady(false);
-  link_up_ = false;
-  sync_blocked_ = false;
-  if (!stopped) return stopped.error();
+  if (!stopped) {
+    // 分发回调内的自 join 被拒绝：事件循环仍然存活，不能拆掉 ready/link 状态，
+    // 否则端点会处于“循环活着但 ready 已清”的半停止状态。
+    return stopped.error();
+  }
+
+  PendingNotifications pending;
+  {
+    std::unique_lock<boost::fibers::mutex> lock(refresh_mutex_);
+    // 停止栅栏：停止前排队、停止后才执行的 refresh 不得再把 ready 置真。
+    stopped_ = true;
+    link_up_ = false;
+    sync_blocked_ = false;
+    SetReadyLocked(false, pending);
+  }
+  EmitNotifications(pending);
   return {};
 }
 
@@ -243,10 +267,20 @@ Coro::Result<QByteArray> ClientBase::CallWithRetry(
 }
 
 Coro::Result<void> ClientBase::refreshProperties() {
-  std::unique_lock<boost::fibers::mutex> lock(refresh_mutex_);
-  sync_blocked_ = false;
-  ResetPropertiesForResync();
-  return SyncOnce();
+  PendingNotifications pending;
+  Coro::Result<void> result;
+  {
+    std::unique_lock<boost::fibers::mutex> lock(refresh_mutex_);
+    if (stopped_) {
+      result = RpcError(RpcErrc::kInvalidState);
+    } else {
+      sync_blocked_ = false;
+      ResetPropertiesForResync();
+      result = SyncOnce(pending);
+    }
+  }
+  EmitNotifications(pending);
+  return result;
 }
 
 transport::DdsNode& ClientBase::node() { return node_; }
@@ -317,7 +351,7 @@ Coro::Result<void> ClientBase::RenewEvents() {
   return StartEvents();
 }
 
-Coro::Result<void> ClientBase::SyncOnce() {
+Coro::Result<void> ClientBase::SyncOnce(PendingNotifications& pending) {
   auto synced = CallWithRetry(wire::kSnapshotOp, {},
                               transport::RetryPolicy{
                                   std::chrono::milliseconds(500), 1});
@@ -328,9 +362,10 @@ Coro::Result<void> ClientBase::SyncOnce() {
       if (text.isEmpty()) text = QString::fromStdString(error.message());
       SetLastErrorText(text);
       sync_blocked_ = true;
-      EmitSyncFailed(text);
+      pending.sync_failed = true;
+      pending.sync_failed_message = text;
     }
-    SetReady(false);
+    SetReadyLocked(false, pending);
     return error;
   }
 
@@ -345,12 +380,13 @@ Coro::Result<void> ClientBase::SyncOnce() {
     // 快照无法应用是协议/语义错误；自动重试只会重复同一份坏快照，按同步阻塞
     // 处理，等待下一次链路 Up 或显式 refreshProperties()。
     sync_blocked_ = true;
-    EmitSyncFailed(text);
-    SetReady(false);
+    pending.sync_failed = true;
+    pending.sync_failed_message = text;
+    SetReadyLocked(false, pending);
     return error;
   }
 
-  SetReady(true);
+  SetReadyLocked(true, pending);
   return {};
 }
 
@@ -359,9 +395,17 @@ void ClientBase::SetLastErrorText(const QString& text) {
   last_error_text_ = text;
 }
 
-void ClientBase::SetReady(bool ready) {
+void ClientBase::SetReadyLocked(bool ready, PendingNotifications& pending) {
   if (ready_.exchange(ready) == ready) return;
-  EmitReadyChanged(ready);
+  pending.ready_changed = true;
+  pending.ready = ready;
+}
+
+void ClientBase::EmitNotifications(const PendingNotifications& pending) {
+  // 必须先 set ready、后报 syncFailed：调用方已释放 refresh_mutex_，槽内可以
+  // 安全重入 refreshProperties()/RPC，但不得调用 stop()（自 join 契约不变）。
+  if (pending.ready_changed) EmitReadyChanged(pending.ready);
+  if (pending.sync_failed) EmitSyncFailed(pending.sync_failed_message);
 }
 
 }  // namespace ddsrpc

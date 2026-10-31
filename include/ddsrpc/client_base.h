@@ -44,10 +44,13 @@ struct ClientConfig {
 /// 调用任何纯虚函数、不 join fiber；若析构时事件任务/订阅仍活跃，Debug 下断言，
 /// 所有构建下打日志，因为此时已经无法安全清理（任务回调仍可能引用派生对象）。
 ///
-/// **回调重入契约**：不得从客户端信号回调（`DispatchSignal` / `DispatchProperty` /
-/// `EmitReadyChanged` / `EmitSyncFailed` 触发的用户代码）调用生成的 `stop()`。
-/// `stop()` 会 join 事件 fiber；从该 fiber 内调用就是自 join。`StopEvents()` 会
-/// 拒绝这种重入并返回 `kInvalidState`，调用方应把停止操作推迟到回调之外。
+/// **回调重入契约**：`EmitReadyChanged` / `EmitSyncFailed` 一律在释放
+/// `refresh_mutex_` 之后发射，因此信号槽可以安全地重新调用 `refreshProperties()`
+/// 或发起 RPC（不会重入刷新临界区）。但不得从任何客户端信号回调
+/// （`DispatchSignal` / `DispatchProperty` / `EmitReadyChanged` / `EmitSyncFailed`
+/// 触发的用户代码）调用生成的 `stop()`：`stop()` 会 join 事件 fiber；从该 fiber
+/// 内调用就是自 join。`StopEvents()` 会拒绝这种重入并返回 `kInvalidState`，
+/// 调用方应把停止操作推迟到回调之外。
 ///
 /// ready 是原子只读标志，可从任意线程查询；其余受保护方法预期在节点执行线程的
 /// fiber 中调用。纯虚函数由生成代码实现，用于属性缓存 / 信号分发 / Qt 信号发射。
@@ -63,6 +66,8 @@ class ClientBase {
   [[nodiscard]] QString lastErrorText() const;
   /// 显式刷新属性快照。与链路监控共用 `refresh_mutex_`，两路刷新不会交错执行
   /// `ResetPropertiesForResync()` / `ApplyPropertySnapshot()`。必须在 fiber 中调用。
+  /// 端点已 `StopEndpoint()` 后返回 `kInvalidState`，不会把 ready 重新置真；
+  /// 再次 `StartEvents()` 后恢复可用。
   [[nodiscard]] Coro::Result<void> refreshProperties();
 
  protected:
@@ -92,11 +97,22 @@ class ClientBase {
   virtual void EmitSyncFailed(const QString& message) = 0;
 
  private:
+  /// 一次状态转换中累积的通知，在释放 `refresh_mutex_` 之后统一发射。
+  /// 持有刷新锁时绝不调用 `EmitReadyChanged` / `EmitSyncFailed`：用户槽可能
+  /// 重入刷新入口，Boost.Fiber 会抛 `lock_error` 或死锁。
+  struct PendingNotifications {
+    bool ready_changed = false;
+    bool ready = false;
+    bool sync_failed = false;
+    QString sync_failed_message;
+  };
+
   void EventLoop();
   [[nodiscard]] Coro::Result<void> RenewEvents();
-  [[nodiscard]] Coro::Result<void> SyncOnce();
+  [[nodiscard]] Coro::Result<void> SyncOnce(PendingNotifications& pending);
   void SetLastErrorText(const QString& text);
-  void SetReady(bool ready);
+  void SetReadyLocked(bool ready, PendingNotifications& pending);
+  void EmitNotifications(const PendingNotifications& pending);
 
   transport::DdsNode& node_;
   ClientConfig config_;
@@ -106,12 +122,16 @@ class ClientBase {
   mutable std::mutex error_mutex_;
   QString last_error_text_;
   /// 属性刷新临界区（fiber 感知，跨 `CallWithRetry` 的让出仍持锁）。
-  /// 串行化链路监控与显式 refresh 的 reset / snapshot apply。
+  /// 串行化链路监控与显式 refresh 的 reset / snapshot apply。持锁期间不发射
+  /// 任何客户端信号；信号统一在解锁后由 `EmitNotifications` 发出。
   boost::fibers::mutex refresh_mutex_;
   bool link_up_ = false;
   bool sync_blocked_ = false;
   bool in_event_dispatch_ = false;
   boost::fibers::fiber::id event_dispatch_fiber_;
+  /// `StopEndpoint()` 成功后置真；阻止停止前排队、停止后才执行的刷新把 ready
+  /// 重新置真。成功 `StartEvents()` 后清除（支持 stop 后再次 start）。
+  bool stopped_ = false;
   bool prepared_ = false;
   bool running_ = false;
 };

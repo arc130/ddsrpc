@@ -91,6 +91,7 @@ class SlowSnapshotService final : public ddsrpc::ServiceBase {
 
   std::atomic<int> in_flight{0};
   std::atomic<int> max_in_flight{0};
+  std::atomic<int> snapshot_requests{0};
 
  protected:
   ddsrpc::OperationResult HandleOperation(quint32, QDataStream&) override {
@@ -99,6 +100,7 @@ class SlowSnapshotService final : public ddsrpc::ServiceBase {
   }
 
   ddsrpc::OperationResult BuildPropertySnapshot() override {
+    snapshot_requests.fetch_add(1);
     const int current = in_flight.fetch_add(1) + 1;
     int observed = max_in_flight.load();
     while (current > observed &&
@@ -145,6 +147,24 @@ class BareClient : public ddsrpc::ClientBase {
   bool stop_from_dispatch = false;
   bool stop_attempted = false;
   std::error_code stop_attempt_error;
+  bool stop_endpoint_from_dispatch = false;
+  bool stop_endpoint_attempted = false;
+  std::error_code stop_endpoint_attempt_error;
+  bool refresh_on_ready_changed = false;
+  bool refresh_on_sync_failed = false;
+  bool nested_refresh_attempted = false;
+  bool nested_refresh_succeeded = false;
+  std::error_code nested_refresh_error;
+
+  /// 模拟用户槽在信号回调中重新进入刷新入口。修复前回调在 refresh_mutex_
+  /// 持有时执行，boost::fibers::mutex 会抛 lock_error 或死锁。
+  void TryNestedRefresh() {
+    if (nested_refresh_attempted) return;
+    nested_refresh_attempted = true;
+    auto refreshed = Refresh();
+    nested_refresh_succeeded = static_cast<bool>(refreshed);
+    if (!refreshed) nested_refresh_error = refreshed.error();
+  }
 
  protected:
   void ResetPropertiesForResync() override { ++reset_count; }
@@ -169,6 +189,11 @@ class BareClient : public ddsrpc::ClientBase {
       stop_attempted = true;
       stop_attempt_error = StopEventLoop().error();
     }
+    if (stop_endpoint_from_dispatch) {
+      stop_endpoint_attempted = true;
+      const auto stopped = Shutdown();
+      if (!stopped) stop_endpoint_attempt_error = stopped.error();
+    }
   }
 
   void DispatchProperty(quint32 event_id, quint64 revision,
@@ -179,11 +204,15 @@ class BareClient : public ddsrpc::ClientBase {
     in >> last_property_value;
   }
 
-  void EmitReadyChanged(bool ready) override { ready_states.push_back(ready); }
+  void EmitReadyChanged(bool ready) override {
+    ready_states.push_back(ready);
+    if (refresh_on_ready_changed && ready) TryNestedRefresh();
+  }
 
   void EmitSyncFailed(const QString& message) override {
     ++sync_failed_count;
     sync_failures.push_back(message);
+    if (refresh_on_sync_failed) TryNestedRefresh();
   }
 };
 
@@ -263,6 +292,13 @@ TEST(ClientBaseTest, LinkLossClearsReadyAndNextUpResyncs) {
   EXPECT_TRUE(env.bare.ready());
   EXPECT_EQ(env.bare.reset_count, 2);
   EXPECT_EQ(env.bare.ready_states.size(), 3u);
+
+  // The rising edge rebuilt the subscription: events flow again.
+  ASSERT_TRUE(PublishEvent(env.server.node(), test_support::kEchoSchema,
+                           ddsrpc::wire::EventKind::kSignal, 11, 1));
+  ASSERT_TRUE(
+      test_support::PumpUntil([&] { return env.bare.signal_count == 1; }));
+  EXPECT_EQ(env.bare.last_signal_id, 11u);
 
   const auto reply = env.bare.Echo(EncodeString(QStringLiteral("again")));
   ASSERT_TRUE(reply) << reply.error().message();
@@ -465,6 +501,93 @@ TEST(ClientBaseTest, DownAfterStandaloneRefreshClearsReady) {
   EXPECT_TRUE(env.service.Stop());
 }
 
+TEST(ClientBaseTest, ReadyChangedCallbackCanReenterRefresh) {
+  EchoEnv env;
+  ASSERT_TRUE(StartEchoEnv(env));
+  env.bare.refresh_on_ready_changed = true;
+
+  // Manual refresh emits readyChanged(true) after the refresh mutex is released,
+  // so the slot can call refreshProperties() again without a fibers lock_error.
+  ASSERT_TRUE(env.bare.Refresh());
+  EXPECT_TRUE(env.bare.ready());
+  EXPECT_TRUE(env.bare.nested_refresh_attempted);
+  EXPECT_TRUE(env.bare.nested_refresh_succeeded);
+  EXPECT_EQ(env.bare.reset_count, 2);
+  ASSERT_EQ(env.bare.ready_states.size(), 1u);
+  EXPECT_TRUE(env.bare.ready_states[0]);
+
+  EXPECT_TRUE(env.bare.Shutdown());
+  EXPECT_TRUE(env.service.Stop());
+}
+
+TEST(ClientBaseTest, SyncFailedCallbackCanReenterRefresh) {
+  EchoEnv env;
+  ASSERT_TRUE(StartEchoEnv(env));
+  env.bare.fail_snapshot = true;
+  env.bare.refresh_on_sync_failed = true;
+
+  // Link-monitor path: snapshot apply fails, syncFailed is emitted outside the
+  // refresh mutex, and the slot's refresh re-enters safely (guarded once).
+  const auto synced = env.bare.Sync();
+  ASSERT_FALSE(synced);
+  EXPECT_EQ(synced.error(), ddsrpc::make_error_code(ddsrpc::RpcErrc::kProtocol));
+  EXPECT_FALSE(env.bare.ready());
+  EXPECT_TRUE(env.bare.nested_refresh_attempted);
+  EXPECT_FALSE(env.bare.nested_refresh_succeeded);
+  EXPECT_EQ(env.bare.nested_refresh_error,
+            ddsrpc::make_error_code(ddsrpc::RpcErrc::kProtocol));
+  EXPECT_EQ(env.bare.sync_failed_count, 2);
+  EXPECT_EQ(env.bare.reset_count, 2);
+  EXPECT_TRUE(env.bare.ready_states.empty());
+
+  EXPECT_TRUE(env.bare.Shutdown());
+  EXPECT_TRUE(env.service.Stop());
+}
+
+TEST(ClientBaseTest, RefreshAfterStopIsRejected) {
+  EchoEnv env;
+  ASSERT_TRUE(StartEchoEnv(env));
+  ASSERT_TRUE(env.bare.Sync());
+  ASSERT_TRUE(env.bare.Shutdown());
+  EXPECT_FALSE(env.bare.ready());
+  const int resets = env.bare.reset_count;
+
+  const auto refreshed = env.bare.Refresh();
+  ASSERT_FALSE(refreshed);
+  EXPECT_EQ(refreshed.error(),
+            ddsrpc::make_error_code(ddsrpc::RpcErrc::kInvalidState));
+  EXPECT_FALSE(env.bare.ready());
+  EXPECT_EQ(env.bare.reset_count, resets);
+
+  // Starting the endpoint again re-enables explicit refresh.
+  ASSERT_TRUE(env.bare.StartEventLoop());
+  ASSERT_TRUE(env.bare.Refresh());
+  EXPECT_TRUE(env.bare.ready());
+  EXPECT_EQ(env.bare.reset_count, resets + 1);
+
+  EXPECT_TRUE(env.bare.Shutdown());
+  EXPECT_TRUE(env.service.Stop());
+}
+
+TEST(ClientBaseTest, QueuedRefreshCannotResurrectReadyAfterStop) {
+  EchoEnv env;
+  ASSERT_TRUE(StartEchoEnv(env));
+  ASSERT_TRUE(env.bare.Sync());
+  ASSERT_TRUE(env.bare.ready());
+
+  // The refresh fiber is queued before stop; whether it runs while stop drains
+  // or after stop completes, it must not leave ready true once stop returns.
+  auto queued = Coro::makeTask([&] { return env.bare.Refresh(); });
+  ASSERT_TRUE(env.bare.Shutdown());
+  (void)queued.get();
+
+  EXPECT_FALSE(env.bare.ready());
+  ASSERT_FALSE(env.bare.ready_states.empty());
+  EXPECT_FALSE(env.bare.ready_states.back());
+
+  EXPECT_TRUE(env.service.Stop());
+}
+
 TEST(ClientBaseTest, SerializesConcurrentSnapshotRefreshes) {
   test_support::FakeDdsFixture fixture;
   test_support::Host server(fixture, "server");
@@ -479,14 +602,33 @@ TEST(ClientBaseTest, SerializesConcurrentSnapshotRefreshes) {
   ASSERT_TRUE(service.Start());
   ASSERT_TRUE(test_support::WaitLinkUp(client.transport()));
 
-  auto first = Coro::makeTask([&] { return bare.Refresh(); });
-  auto second = Coro::makeTask([&] { return bare.Refresh(); });
+  std::atomic<bool> first_started{false};
+  std::atomic<bool> second_attempted{false};
+
+  auto first = Coro::makeTask([&] {
+    first_started.store(true);
+    return bare.Refresh();
+  });
+  // Wait until the first snapshot handler is actually running before launching
+  // the second refresh: the two Refresh() calls really do overlap.
+  ASSERT_TRUE(test_support::PumpUntil(
+      [&] { return service.in_flight.load() == 1; }));
+  auto second = Coro::makeTask([&] {
+    second_attempted.store(true);
+    return bare.Refresh();
+  });
+  ASSERT_TRUE(
+      test_support::PumpUntil([&] { return second_attempted.load(); }));
+  EXPECT_TRUE(first_started.load());
+  EXPECT_EQ(service.in_flight.load(), 1);
+
   auto first_result = first.get();
   auto second_result = second.get();
   ASSERT_TRUE(first_result) << first_result.error().message();
   ASSERT_TRUE(second_result) << second_result.error().message();
   EXPECT_TRUE(bare.ready());
   EXPECT_EQ(bare.reset_count, 2);
+  EXPECT_EQ(service.snapshot_requests.load(), 2);
   EXPECT_EQ(service.max_in_flight.load(), 1);
 
   EXPECT_TRUE(bare.Shutdown());
@@ -629,6 +771,36 @@ TEST(ClientBaseTest, RejectsStopFromEventDispatch) {
 
   EXPECT_TRUE(env.bare.StopEventLoop());
   EXPECT_TRUE(env.bare.Shutdown());
+  EXPECT_TRUE(env.service.Stop());
+}
+
+TEST(ClientBaseTest, StopEndpointRejectsReentrancyWithoutTearingDownState) {
+  EchoEnv env;
+  ASSERT_TRUE(StartEchoEnv(env));
+  ASSERT_TRUE(env.bare.Sync());
+  ASSERT_TRUE(env.bare.ready());
+  ASSERT_EQ(env.bare.ready_states.size(), 1u);
+
+  env.bare.stop_endpoint_from_dispatch = true;
+  ASSERT_TRUE(PublishEvent(env.server.node(), test_support::kEchoSchema,
+                           ddsrpc::wire::EventKind::kSignal, 7, 1));
+  ASSERT_TRUE(
+      test_support::PumpUntil([&] { return env.bare.stop_endpoint_attempted; }));
+  EXPECT_EQ(env.bare.stop_endpoint_attempt_error,
+            ddsrpc::make_error_code(ddsrpc::RpcErrc::kInvalidState));
+
+  // A rejected stop must not clear ready or tear down the live event loop.
+  EXPECT_TRUE(env.bare.ready());
+  ASSERT_EQ(env.bare.ready_states.size(), 1u);
+
+  env.bare.stop_endpoint_from_dispatch = false;
+  ASSERT_TRUE(PublishEvent(env.server.node(), test_support::kEchoSchema,
+                           ddsrpc::wire::EventKind::kSignal, 8, 2));
+  ASSERT_TRUE(
+      test_support::PumpUntil([&] { return env.bare.signal_count == 2; }));
+
+  EXPECT_TRUE(env.bare.Shutdown());
+  EXPECT_FALSE(env.bare.ready());
   EXPECT_TRUE(env.service.Stop());
 }
 
