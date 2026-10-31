@@ -1,0 +1,6 @@
+[submodule "third_party/AsyncTask"]
+	path = third_party/AsyncTask
+	url = https://github.com/Ste7an-cs/AsyncTask
+[submodule "third_party/Transport"]
+	path = third_party/Transport
+	url = https://github.com/Ste7an-cs/Transport
