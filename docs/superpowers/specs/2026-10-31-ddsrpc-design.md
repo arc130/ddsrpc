@@ -18,6 +18,7 @@
 - PROP 生成属性缓存、初始快照、变更推送和可选的远端写入；
 - 服务端每个请求在独立 `Coro::makeTask` 中执行；
 - 客户端 `prepare/start` 不依赖服务在线，后台协程完成首次握手和属性快照；
+- 客户端监控 DDS 链路状态；服务端重启或网络中断后重连时，自动重新握手并刷新 PROP 缓存；
 - 双端均由本生成器生成，载荷使用 QDataStream 编码。
 
 ## 2. 范围
@@ -30,6 +31,7 @@
 - `class`、`POD`、顶层/类内 `ENUM`；
 - `PROP`、`SIGNAL`、`SLOT`；
 - 生成 service-only、client-only 或同时生成两种角色的代码；
+- 客户端基于 DdsTransport 链路状态自动检测重连，并自动刷新 PROP；
 - CMake 代码生成与构建集成；
 - 一个 qmake 消费示例；
 - 生成器单元测试、wire 单元测试、FakeDdsProvider 端到端测试；
@@ -44,7 +46,7 @@
 - 标准 DDS/CDR、IDL4、其他语言互通；
 - 真实 Fast DDS 跨进程验收；
 - DDS QoS 的逐接口配置；
-- 服务重启后的客户端自动恢复；
+- 重连时自动重发/恢复在途 RPC（只自动刷新属性并恢复 ready）；
 - 服务端并发上限与请求去重；
 - qmake 与 CMake 的完整等价支持（qmake 仅提供消费示例）。
 
@@ -237,7 +239,7 @@ ddsrpcgen --role types|service|client|all
 
 - 统一 magic/version/schema/op/event 信封的编码与校验；
 - `ServiceBase`：注册服务/发布者、接收请求、为每个请求启动协程、追踪并汇合处理协程、回包；
-- `ClientBase`：注册客户端/订阅者、事件接收协程、后台握手协程、属性 revision 合并、远端错误映射；
+- `ClientBase`：注册客户端/订阅者、事件接收协程、链路状态监控与自动重连、后台握手/属性刷新协程、属性 revision 合并、远端错误映射；
 - 生成代码负责类型化参数编解码、Qt 信号发射和业务虚函数调用；
 - 不依赖 Qt Remote Objects运行时。
 
@@ -423,9 +425,15 @@ public:
         std::string service_name = "Calculator";
         transport::RetryPolicy request_retry{std::chrono::milliseconds(2000), 3};
         std::chrono::milliseconds handshake_interval{1000};
+        std::chrono::milliseconds link_poll_interval{100};
     };
 
     explicit CalculatorClient(transport::DdsNode& node,
+                              transport::DdsTransport& transport,
+                              Options options = {},
+                              QObject* parent = nullptr);
+    explicit CalculatorClient(transport::DdsNode& node,
+                              ddsrpc::LinkStateSource& link_state,
                               Options options = {},
                               QObject* parent = nullptr);
     ~CalculatorClient() override;
@@ -464,27 +472,51 @@ signals:
 - `start()`：
   - 不等待服务上线，不阻塞；
   - `Subscribe(event_topic, kNotify)`，启动事件接收协程；
-  - 启动后台握手协程；
+  - 启动链路监控协程；
   - 返回成功。node 未 Running 时原样返回 DdsNode/Transport 错误（通常为 `kClosed`）。
 - 重复 `prepare()` 在已 prepared 状态下为幂等成功；运行中再次 `prepare()`/`start()` 返回 `kInvalidState`；未 start 时 `stop()` 为幂等成功。
 - `stop()`：
   - 置停止标志；
-  - 关闭事件订阅邮箱并唤醒后台握手等待；
-  - cancel + join 事件协程和握手协程；
+  - 关闭事件订阅邮箱并唤醒链路监控/刷新的等待；
+  - cancel + join 事件协程、链路监控协程和在途刷新协程；
   - 幂等；把 `ready` 置回 false、属性缓存重置为 IDL 默认值并清空 revision，再次 `start()` 时重新握手。
 - `~CalculatorClient()` 要求已 stop；运行中析构属于使用错误。
 
-### 8.3 后台握手与 ready
+### 8.3 链路监控、自动重连与属性刷新
 
-- 后台协程循环：
-  1. 通过 DdsNode 发送内部 op 0 的握手/属性快照请求。握手使用固定的 `RetryPolicy{500ms, 1}`，避免服务离线时长时间占住后台协程。实现不直接读取 `DdsTransport::CurrentLinkState()`；握手请求成功且信封校验通过，即视为链路建立并完成 schema 匹配。
-  2. 成功：校验 wire/schema，应用属性快照并重置属性 revision 基线，置 `ready = true`，发 `readyChanged(true)`，退出。
-  3. `kSchemaMismatch`/`kProtocol`：保存错误文本，发 `syncFailed(message)`，不再重试。
-  4. 超时/传输错误：按 `Options::handshake_interval` 协程休眠后重试，直到 stop；`kCancelled`、`kClosed`、`kInvalidState` 视为停止条件，直接退出。
-- 服务未上线时 `start()` 成功，`ready()` 为 false；服务上线后自动 ready。`ready` 以原子标志实现，可由其他线程只读查询。
-- `refreshProperties()` 立即做一次同样语义的快照请求并返回其结果；可在 ready 后用于主动重同步。
-- 已经 ready 后不持续监控服务存活；后续 RPC 超时由调用方处理。
-- 服务重启不自动恢复：本版不检测重启、不自动重发在途请求，也不自动重新快照；调用方可 `refreshProperties()` 重置 revision 基线并重新同步，或重建客户端。schema 不变且服务已恢复时，普通 RPC 可继续使用。
+> **接口约束与可替换点**：`transport::DdsNode` 0.6.0 没有公开连接状态接口；当前可用的事实源是 `transport::DdsTransport::CurrentLinkState()`。为了避免生成代码直接绑死该 API，runtime 提供：
+>
+> ```cpp
+> namespace ddsrpc {
+> enum class LinkState { kDown, kEstablishing, kUp };
+> class LinkStateSource {
+> public:
+>     virtual ~LinkStateSource() = default;
+>     virtual LinkState currentLinkState() const = 0;
+> };
+> class DdsTransportLinkStateSource final : public LinkStateSource {
+> public:
+>     explicit DdsTransportLinkStateSource(transport::DdsTransport&);
+>     LinkState currentLinkState() const override;
+> };
+> }
+> ```
+>
+> 生成 Client 的 `DdsTransport&` 构造重载内部持有 `DdsTransportLinkStateSource`；另一个构造重载接受任意 `LinkStateSource&`，便于后续接入新 SDK/新 API 时只替换 adapter。传入的 transport/source 必须寿命长于 Client；使用 transport 重载时，transport 必须是构造 node 所用的那一个。
+
+- 生成的 Client 启动一个链路监控协程，按 `Options::link_poll_interval`（默认 100 ms）轮询 `LinkStateSource::currentLinkState()`。
+- 状态机：
+  1. **未 Up**（`kDown`/`kEstablishing`）：若此前 `ready==true`，置 `ready=false` 并发 `readyChanged(false)`；不刷新属性，等待链路。
+  2. **首次 Up**：发起首次应用层握手（内部 op 0，携带 schema hash 和属性快照请求）。成功后置 `ready=true`，发 `readyChanged(true)`。
+  3. **再次 Up**（此前观察到非 Up，即服务端重启或网络中断后的重连）：先废弃旧事件订阅、重新订阅事件 topic，再重置属性 revision 基线并发起全量属性快照，完成后置 `ready=true`。这就是自动 PROP 刷新。
+- 应用层握手请求使用固定的 `RetryPolicy{500ms, 1}`，避免服务离线时长期占用协程。链路 Up 但服务尚不可达时，按 `Options::handshake_interval` 重试；`kSchemaMismatch`/`kProtocol` 会置 `ready=false`、记录 `lastErrorText()`、发 `syncFailed(message)` 并停止自动重试，直到下一次链路 Up 或显式 `refreshProperties()`。
+- 重连刷新期间：
+  - 事件接收协程继续工作；旧订阅在 Up 转移时被关闭并重建，避免把断线前积压的旧事件用于新会话。
+  - 新快照应用前重置每个属性的 revision 基线；快照和刷新期间收到的事件按 revision 合并：某属性已有更新 revision 时不回退到快照值。
+- `refreshProperties()` 是显式的协程刷新入口：与链路监控共用同一个刷新互斥区，避免并发快照；它会重新请求全量属性并重置 revision 基线。链路未 Up 时可尝试请求，失败则按 Transport 错误返回。
+- `ready` 以原子标志实现，可由其他线程只读查询；所有信号从节点执行线程发射。
+- 链路状态由 `DdsTransport` 按“已声明端点整体”聚合，不是按服务/接口区分。同一 client node 上若有多个服务，本接口的自动刷新可能由其他端点的状态变化触发；此时以快照请求成功/失败作为本服务是否真正可达的最终判据。
+- 本版仍不自动重发重连前在途的 RPC，也不保证每个 RPC 语义上的“断线重试”；调用方负责重试。自动恢复范围仅限 `ready` 状态与 PROP 缓存。
 
 ### 8.4 事件接收
 
@@ -523,12 +555,12 @@ signals:
 
 - 属性的初始值来自 IDL 默认表达式；客户端先以该值初始化缓存，握手成功后由服务端快照覆盖。
 - 快照与事件均带 revision；客户端只接受更高的 revision。先订阅事件、后请求快照，避免启动窗口丢更新。
-- 服务端属性变更 revision 单调递增；属性事件和 SIGNAL 事件共享同一服务运行期间的事件序号空间。revision 只用于同一轮服务运行内的排序/去重，不承担实例身份识别；`refreshProperties()` 会用快照重置客户端 revision 基线。
+- 服务端属性变更 revision 单调递增；属性事件和 SIGNAL 事件共享同一服务运行期间的事件序号空间。revision 只用于同一轮服务运行内的排序/去重，不承担实例身份识别；链路重连后的自动刷新和 `refreshProperties()` 都会用快照重置客户端 revision 基线。
 - `PERSISTED` 不在本版支持。
 
 ## 10. 生命周期与线程契约
 
-- 宿主拥有并启停 `DdsTransport`；`DdsNode` 借用 transport；生成 endpoint 借用 node。
+- 宿主拥有并启停 `DdsTransport`；`DdsNode` 借用 transport；生成的 Service 借用 node，生成的 Client 借用 node 和链路状态源（当前默认 adapter 借用同一个 transport）。transport/source 必须比 client 活得久。
 - 推荐顺序：
 
 ```text
@@ -634,6 +666,10 @@ ddsrpc_add_idl(<target>
 - schema hash 不匹配；
 - 生命周期误用：node 未 Running 时 start、重复 stop、stop 时存在在途请求；
 - 先 client 后 service 的自动握手；
+- 服务端停止再以相同 schema 重启：链路状态由 Up 变非 Up，客户端 `ready` 变 false；再次 Up 后自动重新订阅、刷新 PROP，缓存反映重启后的新值，`ready` 恢复 true；
+- 网络中断/恢复路径（用 FakeDdsProvider 停止/重建端点模拟）同样触发自动刷新；
+- 用可注入的 FakeLinkStateSource 确定性地驱动 Down → Up，验证自动刷新状态机（不依赖真实发现时序）；
+- 重连不自动重发在途 RPC（调用方收到错误/超时）；
 - import 后跨文件类型/接口可用。
 
 运行方式：`ctest --test-dir build --output-on-failure`。
@@ -647,6 +683,7 @@ ddsrpc_add_idl(<target>
 - WSL 下 CMake 构建、全部测试通过；
 - qmake 示例构建运行通过；
 - service-only / client-only 目标只包含对应角色生成物；
+- 服务端重启或模拟断线重连后，客户端能通过链路状态检测自动完成 `ready` 恢复和 PROP 全量刷新；
 - 未支持语法产生确定性诊断；
 - 文档与实际生成 API 一致；
 - 真实 Fast DDS 不作为第一版验收条件。
@@ -661,7 +698,8 @@ ddsrpc_add_idl(<target>
 - 服务端无并发上限，慢处理器/请求洪水可能导致协程过多。
 - READPUSH/READWRITE 都等待服务端确认，和 QtRO 的异步 push 语义不完全相同。
 - 客户端不能直接发布 SIGNAL/PROP，也没有上行单向调用；客户端→服务端只走 SLOT 请求-响应。
-- 服务重启后的客户端自动恢复不在本版；不引入 UUID/会话跟踪，靠 `refreshProperties()` 或重建客户端恢复。
+- 重连后会自动刷新 PROP 并恢复 `ready`，但不自动重发/恢复在途 RPC；调用方需自行重试。
+- 不引入 UUID/会话跟踪；默认断线检测基于 `DdsTransport::CurrentLinkState()` adapter，该状态是已声明端点整体聚合，不是按服务区分。若链路状态未发生可观察的下降，自动刷新可能不会触发；同一 client node 挂多个服务时也可能由其他端点状态触发刷新。后续 SDK 可通过自定义 `LinkStateSource` 替换检测来源。
 - qmake 只是消费示例，不是完整构建体系。
 - 仅验证 FakeDdsProvider；真实 Fast DDS 路径待后续验证。
 
@@ -669,7 +707,8 @@ ddsrpc_add_idl(<target>
 
 - `MODEL/CLASS/FLAG/USE_ENUM`、`PERSISTED`、花括号 POD；
 - 标准 CDR/Fast DDS 类型映射与其他语言互通；
-- 服务重启后的自动重同步（如以后引入 session/instance 机制）；
+- 在途 RPC 的自动重试/幂等恢复；
+- 按服务/接口的链路状态与重连检测；
 - 并发上限、请求去重、背压；
 - qmake 与 CMake 等价支持；
 - 可观测性与指标。
