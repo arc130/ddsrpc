@@ -80,13 +80,53 @@ namespace {
   return kKeywords.contains(name) || name.startsWith(QStringLiteral("Q_"));
 }
 
+// Names emitted by the service/client facades. A member with one of these
+// names would be hidden by (or collide with) generated state, lifecycle
+// methods, or virtual hooks, so they are rejected before emission.
 [[nodiscard]] bool IsReservedMemberName(const QString& name) {
   static const QSet<QString> kReserved = {
-      QStringLiteral("prepare"),           QStringLiteral("start"),
-      QStringLiteral("stop"),              QStringLiteral("ready"),
-      QStringLiteral("readyChanged"),      QStringLiteral("syncFailed"),
-      QStringLiteral("lastErrorText"),     QStringLiteral("refreshProperties"),
+      // Base lifecycle and reflection.
+      QStringLiteral("prepare"),
+      QStringLiteral("start"),
+      QStringLiteral("stop"),
+      QStringLiteral("ready"),
+      QStringLiteral("readyChanged"),
+      QStringLiteral("syncFailed"),
+      QStringLiteral("lastErrorText"),
+      QStringLiteral("refreshProperties"),
+      QStringLiteral("prepared"),
+      QStringLiteral("running"),
       QStringLiteral("Options"),
+      // ServiceBase surface.
+      QStringLiteral("HandleOperation"),
+      QStringLiteral("BuildPropertySnapshot"),
+      QStringLiteral("PublishEvent"),
+      QStringLiteral("NextRevision"),
+      QStringLiteral("schema_hash"),
+      QStringLiteral("node"),
+      // ClientBase surface and generated hooks.
+      QStringLiteral("StartEvents"),
+      QStringLiteral("StopEvents"),
+      QStringLiteral("StopEndpoint"),
+      QStringLiteral("HandleLinkState"),
+      QStringLiteral("Call"),
+      QStringLiteral("CallWithRetry"),
+      QStringLiteral("ResetPropertiesForResync"),
+      QStringLiteral("ApplyPropertySnapshot"),
+      QStringLiteral("DispatchSignal"),
+      QStringLiteral("DispatchProperty"),
+      QStringLiteral("EmitReadyChanged"),
+      QStringLiteral("EmitSyncFailed"),
+      // Generated helpers and state.
+      QStringLiteral("LinkMonitorLoop"),
+      QStringLiteral("ResetPropertyCacheToDefaults"),
+      QStringLiteral("EmitPendingPropertyChanges"),
+      QStringLiteral("transport_"),
+      QStringLiteral("options_"),
+      QStringLiteral("link_monitor_"),
+      QStringLiteral("link_monitor_fiber_"),
+      QStringLiteral("running_"),
+      QStringLiteral("event_dispatch_fiber_"),
   };
   return kReserved.contains(name);
 }
@@ -131,6 +171,79 @@ namespace {
     if (!kWords.contains(word)) return false;
   }
   return true;
+}
+
+// QDataStream only has overloads for the fixed-width Qt integer types. Bare
+// char is ambiguous between qint8/quint8 and platform-dependent, long does not
+// match qint64 on LP64, and wchar_t/char16_t/char32_t/long double have no
+// overload at all. Accepting them would produce generated code that cannot
+// compile, so the semantic layer rejects them with a suggested replacement.
+// The empty string means the builtin is supported.
+[[nodiscard]] QString UnsupportedBuiltinReason(const QString& spelling) {
+  const QStringList words = spelling.split(QLatin1Char(' '), QString::SkipEmptyParts);
+  int longs = 0;
+  int shorts = 0;
+  bool is_unsigned = false;
+  bool is_signed = false;
+  QString base;
+  for (const QString& word : words) {
+    if (word == QStringLiteral("unsigned")) {
+      is_unsigned = true;
+    } else if (word == QStringLiteral("signed")) {
+      is_signed = true;
+    } else if (word == QStringLiteral("long")) {
+      ++longs;
+    } else if (word == QStringLiteral("short")) {
+      ++shorts;
+    } else {
+      base = word;
+    }
+  }
+  if (base.isEmpty()) base = QStringLiteral("int");
+
+  const bool has_sign = is_unsigned || is_signed;
+  const auto invalid = [&spelling] {
+    return QStringLiteral("invalid builtin type spelling '%1'").arg(spelling);
+  };
+  if (is_unsigned && is_signed) return invalid();
+  if ((base == QStringLiteral("bool") || base == QStringLiteral("float") ||
+       base == QStringLiteral("void")) &&
+      (has_sign || longs > 0 || shorts > 0)) {
+    return invalid();
+  }
+  if (base == QStringLiteral("double")) {
+    if (longs > 1 || shorts > 0 || has_sign) return invalid();
+    if (longs == 1) {
+      return QStringLiteral("builtin type '%1' is not supported by QDataStream; use 'double'")
+          .arg(spelling);
+    }
+    return {};
+  }
+  if (base == QStringLiteral("wchar_t") || base == QStringLiteral("char16_t") ||
+      base == QStringLiteral("char32_t")) {
+    return QStringLiteral(
+               "builtin type '%1' is not supported by QDataStream; use an integer type "
+               "or QString")
+        .arg(spelling);
+  }
+  if (base == QStringLiteral("char")) {
+    if (longs > 0 || shorts > 0) return invalid();
+    if (!is_unsigned && !is_signed) {
+      return QStringLiteral(
+                 "builtin type 'char' is not supported by QDataStream because its "
+                 "signedness is platform-dependent; use 'signed char' or 'unsigned char'");
+    }
+    return {};
+  }
+  // Remaining valid base: int (explicit or implied by signed/short/long).
+  if (longs > 2 || shorts > 1 || (longs > 0 && shorts > 0)) return invalid();
+  if (longs == 1) {
+    return QStringLiteral(
+               "builtin type '%1' is not supported by QDataStream; use 'long long' or "
+               "'unsigned long long'")
+        .arg(spelling);
+  }
+  return {};
 }
 
 [[nodiscard]] bool IsBareIdentifier(const QString& text) {
@@ -514,6 +627,8 @@ class SemanticAnalyzer {
     if (builtin) {
       core = spelling;
       result.is_void = spelling == QStringLiteral("void");
+      const QString reason = UnsupportedBuiltinReason(spelling);
+      if (!reason.isEmpty()) diagnostics_.Error(file, loc, reason);
     } else if (has_enum) {
       core = Qualify(enum_model.cpp_name, name_space_);
     } else if (visible.pods.contains(type.base)) {

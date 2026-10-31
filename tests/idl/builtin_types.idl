@@ -1,0 +1,34 @@
+// Accepted QDataStream builtins and containers; compiled by
+// ddsrpc_generated_compile_check to keep the wire-type policy honest.
+ENUM Quality { Low, High }
+
+POD BuiltinValues(
+    bool flag,
+    float ratio,
+    double score,
+    signed char tiny,
+    unsigned char byte,
+    short small,
+    unsigned short width,
+    int count,
+    unsigned int unsigned_count,
+    long long wide,
+    unsigned long long unsigned_wide,
+    Quality quality,
+    QString label,
+    QByteArray blob,
+    QVector<int> values)
+
+class BuiltinApi {
+    ENUM State { Idle, Busy }
+
+    SIGNAL(updated(QString label))
+
+    SLOT(BuiltinValues echo(BuiltinValues value))
+    SLOT(void notify(QString text, int count))
+    SLOT(double scale(double value, float factor))
+    SLOT(State nextState(State state))
+    // Emitter-local names used as parameters must not break generated code.
+    SLOT(int args(int args, int reply, int in, int out))
+    SLOT(QVector<int> values(QVector<int> input))
+};

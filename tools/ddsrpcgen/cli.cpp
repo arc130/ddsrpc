@@ -11,6 +11,8 @@
 #include <cstdio>
 #include <utility>
 
+#include "emit_client.h"
+#include "emit_service.h"
 #include "emit_types.h"
 #include "import_resolver.h"
 #include "semantic.h"
@@ -19,8 +21,8 @@ namespace ddsrpcgen {
 namespace {
 
 const char kUsage[] =
-    "usage: ddsrpcgen --role types --out-dir DIR [--namespace NS] [-I DIR]... "
-    "[--depfile FILE] <root.idl>...\n";
+    "usage: ddsrpcgen --role types|service|client|all --out-dir DIR [--namespace NS] "
+    "[-I DIR]... [--depfile FILE] <root.idl>...\n";
 
 struct GeneratedFile {
   QString target;
@@ -194,15 +196,6 @@ int RunCli(const QStringList& args) {
     return 2;
   }
 
-  if (options->role != QStringLiteral("types")) {
-    diagnostics.Error(QStringLiteral("ddsrpcgen"), SourceLocation{},
-                      QStringLiteral("emitters not implemented for role '%1'; only --role "
-                                     "types is available")
-                          .arg(options->role));
-    PrintDiagnostics(diagnostics);
-    return 1;
-  }
-
   // Merge every root's loaded program by canonical path. A shared import is
   // analyzed once even when several roots reach it.
   LoadedProgram program;
@@ -236,14 +229,37 @@ int RunCli(const QStringList& args) {
     return 1;
   }
 
+  const bool emit_service = options->role == QStringLiteral("service") ||
+                            options->role == QStringLiteral("all");
+  const bool emit_client = options->role == QStringLiteral("client") ||
+                           options->role == QStringLiteral("all");
+
   QVector<GeneratedFile> generated;
-  generated.reserve(model->files.size());
-  for (const FileModel& file : model->files) {
+  generated.reserve(model->files.size() * 5);
+  const auto add_output = [&generated, &output_dir](const QString& name,
+                                                    const QString& contents) {
     GeneratedFile output;
-    output.target =
-        output_dir.filePath(file.stem + QStringLiteral(".ddsrpc.types.h"));
-    output.contents = EmitTypesHeader(file, model->name_space).toUtf8();
+    output.target = output_dir.filePath(name);
+    output.contents = contents.toUtf8();
     generated.append(std::move(output));
+  };
+  for (const FileModel& file : model->files) {
+    // Types headers are always emitted: service/client translation units
+    // include them, and CMake predicts them as outputs for every role.
+    add_output(file.stem + QStringLiteral(".ddsrpc.types.h"),
+               EmitTypesHeader(file, model->name_space));
+    if (emit_service) {
+      add_output(file.stem + QStringLiteral(".ddsrpc.service.h"),
+                 EmitServiceHeader(file, model->name_space));
+      add_output(file.stem + QStringLiteral(".ddsrpc.service.cpp"),
+                 EmitServiceSource(file, model->name_space));
+    }
+    if (emit_client) {
+      add_output(file.stem + QStringLiteral(".ddsrpc.client.h"),
+                 EmitClientHeader(file, model->name_space));
+      add_output(file.stem + QStringLiteral(".ddsrpc.client.cpp"),
+                 EmitClientSource(file, model->name_space));
+    }
   }
 
   QString depfile = options->depfile;

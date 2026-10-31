@@ -174,18 +174,93 @@ TEST(SemanticTest, ResolvesMultiwordBuiltinsFromSpelling) {
       "class Big {\n"
       "  PROP(unsigned long long total = 0)\n"
       "  SLOT(unsigned long long tick(unsigned int amount))\n"
-      "  SLOT(long double ratio())\n"
+      "  SLOT(double ratio())\n"
+      "  SLOT(signed char narrow(unsigned char byte, short small, unsigned short width))\n"
       "};\n",
       QString());
   ASSERT_TRUE(result.model.has_value()) << result.diagnostics.toStdString();
   const auto& cls = result.model->files[0].classes[0];
   ASSERT_EQ(cls.properties.size(), 1);
   EXPECT_EQ(cls.properties[0].cpp_type, QStringLiteral("unsigned long long"));
-  ASSERT_EQ(cls.slots.size(), 2);
+  ASSERT_EQ(cls.slots.size(), 3);
   EXPECT_EQ(cls.slots[0].return_cpp_type, QStringLiteral("unsigned long long"));
   ASSERT_EQ(cls.slots[0].params.size(), 1);
   EXPECT_EQ(cls.slots[0].params[0].cpp_type, QStringLiteral("unsigned int"));
-  EXPECT_EQ(cls.slots[1].return_cpp_type, QStringLiteral("long double"));
+  EXPECT_EQ(cls.slots[1].return_cpp_type, QStringLiteral("double"));
+  EXPECT_EQ(cls.slots[2].return_cpp_type, QStringLiteral("signed char"));
+  ASSERT_EQ(cls.slots[2].params.size(), 3);
+  EXPECT_EQ(cls.slots[2].params[0].cpp_type, QStringLiteral("unsigned char"));
+  EXPECT_EQ(cls.slots[2].params[1].cpp_type, QStringLiteral("short"));
+  EXPECT_EQ(cls.slots[2].params[2].cpp_type, QStringLiteral("unsigned short"));
+}
+
+TEST(SemanticTest, RejectsQDataStreamUnsupportedBuiltins) {
+  QTemporaryDir tmp;
+  ASSERT_TRUE(tmp.isValid());
+  const QStringList types = {
+      QStringLiteral("char"),           QStringLiteral("wchar_t"),
+      QStringLiteral("char16_t"),       QStringLiteral("char32_t"),
+      QStringLiteral("long"),           QStringLiteral("unsigned long"),
+      QStringLiteral("long double"),    QStringLiteral("QVector<long>"),
+      QStringLiteral("QList<char>"),
+  };
+  for (int index = 0; index < types.size(); ++index) {
+    const QString& type = types.at(index);
+    const auto result = AnalyzeText(
+        tmp.path(), QStringLiteral("unsupported_%1.idl").arg(index),
+        QStringLiteral("class C { SLOT(void use(%1 value)) }\n").arg(type).toUtf8());
+    EXPECT_FALSE(result.model.has_value()) << type.toStdString();
+    EXPECT_NE(result.diagnostics.indexOf(QStringLiteral("QDataStream")), -1)
+        << type.toStdString() << ": " << result.diagnostics.toStdString();
+  }
+}
+
+TEST(SemanticTest, RejectsInvalidBuiltinSpellings) {
+  QTemporaryDir tmp;
+  ASSERT_TRUE(tmp.isValid());
+  const QStringList types = {
+      QStringLiteral("unsigned double"), QStringLiteral("long float"),
+      QStringLiteral("long short int"),  QStringLiteral("unsigned signed int"),
+      QStringLiteral("long long long"),  QStringLiteral("short char"),
+  };
+  for (int index = 0; index < types.size(); ++index) {
+    const QString& type = types.at(index);
+    const auto result = AnalyzeText(
+        tmp.path(), QStringLiteral("invalid_builtin_%1.idl").arg(index),
+        QStringLiteral("class C { SLOT(void use(%1 value)) }\n").arg(type).toUtf8());
+    EXPECT_FALSE(result.model.has_value()) << type.toStdString();
+    EXPECT_NE(result.diagnostics.indexOf(QStringLiteral("invalid builtin")), -1)
+        << type.toStdString() << ": " << result.diagnostics.toStdString();
+  }
+}
+
+TEST(SemanticTest, RejectsEmitterInternalMemberNames) {
+  QTemporaryDir tmp;
+  ASSERT_TRUE(tmp.isValid());
+  const QStringList names = {
+      QStringLiteral("HandleOperation"),
+      QStringLiteral("BuildPropertySnapshot"),
+      QStringLiteral("transport_"),
+      QStringLiteral("options_"),
+      QStringLiteral("link_monitor_"),
+      QStringLiteral("link_monitor_fiber_"),
+      QStringLiteral("running_"),
+      QStringLiteral("ResetPropertyCacheToDefaults"),
+      QStringLiteral("event_dispatch_fiber_"),
+      QStringLiteral("EmitPendingPropertyChanges"),
+  };
+  for (int index = 0; index < names.size(); ++index) {
+    const QString& name = names.at(index);
+    const auto result = AnalyzeText(
+        tmp.path(), QStringLiteral("emitter_name_%1.idl").arg(index),
+        QStringLiteral("class C { SLOT(void %1()) }\n").arg(name).toUtf8());
+    EXPECT_FALSE(result.model.has_value()) << name.toStdString();
+    EXPECT_NE(result.diagnostics.indexOf(name), -1) << name.toStdString();
+  }
+  const auto enum_result =
+      AnalyzeText(tmp.path(), "emitter_enum.idl", "class C { ENUM transport_ { A } }\n");
+  EXPECT_FALSE(enum_result.model.has_value());
+  EXPECT_NE(enum_result.diagnostics.indexOf(QStringLiteral("transport_")), -1);
 }
 
 TEST(SemanticTest, SortsPodDependenciesAndRejectsCycles) {

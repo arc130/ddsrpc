@@ -2,6 +2,9 @@ add_library(ddsrpcgen_lib STATIC
   cli.cpp
   code_writer.cpp
   diagnostic.cpp
+  emit_client.cpp
+  emit_common.cpp
+  emit_service.cpp
   emit_types.cpp
   import_resolver.cpp
   lexer.cpp
