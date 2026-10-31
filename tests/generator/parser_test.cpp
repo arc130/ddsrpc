@@ -140,22 +140,204 @@ TEST(ParserTest, ReportsImportSyntaxErrorsAtTokenLocation) {
   EXPECT_NE(diagnostics.All()[0].message.indexOf(QStringLiteral("string")), -1);
 }
 
-TEST(ParserTest, ReportsClassParsingAsDeferred) {
+TEST(ParserTest, ParsesClassMembersTypesAndDefaults) {
   const QString source = QStringLiteral(
+      "POD Point(int x, int y)\n"
+      "ENUM Mode { Idle, Running }\n"
       "class Calc {\n"
+      "  ENUM State { Ready, Busy }\n"
       "  PROP(int total = 42)\n"
+      "  PROP(QString name READONLY)\n"
+      "  PROP(Mode mode = Idle READWRITE)\n"
+      "  PROP(QString label = \"a b\")\n"
+      "  PROP(QString quoted = \"a\\\"b\")\n"
+      "  SIGNAL(updated(int total))\n"
+      "  SLOT(int add(int a, const QString &label))\n"
+      "  SLOT(void reset())\n"
+      "  SLOT(QMap<QString, QList<Point>> history(const int &limit))\n"
       "};\n");
   Diagnostics diagnostics;
   Lexer lexer(QStringLiteral("calc.idl"), source, diagnostics);
   Parser parser(QStringLiteral("calc.idl"), lexer.Scan(), source, diagnostics);
   const auto ast = parser.Parse();
 
-  EXPECT_FALSE(ast.has_value());
-  ASSERT_TRUE(diagnostics.HasErrors());
-  const QString formatted = diagnostics.Format();
-  EXPECT_NE(formatted.indexOf(QStringLiteral("class")), -1);
-  EXPECT_NE(formatted.indexOf(QStringLiteral("not yet available")), -1);
-  ASSERT_EQ(diagnostics.All().size(), 1) << formatted.toStdString();
-  EXPECT_EQ(diagnostics.All()[0].loc.line, 1);
-  EXPECT_EQ(diagnostics.All()[0].loc.column, 1);
+  ASSERT_TRUE(ast.has_value()) << diagnostics.Format().toStdString();
+  ASSERT_EQ(ast->classes.size(), 1);
+  const auto& cls = ast->classes[0];
+  ASSERT_EQ(cls.properties.size(), 5);
+  EXPECT_EQ(cls.properties[0].default_value, QStringLiteral("42"));
+  EXPECT_EQ(cls.properties[1].modifier, PropModifier::kReadOnly);
+  EXPECT_EQ(cls.properties[2].modifier, PropModifier::kReadWrite);
+  EXPECT_EQ(cls.properties[3].default_value, QStringLiteral("\"a b\""));
+  EXPECT_EQ(cls.properties[4].default_value, QStringLiteral("\"a\\\"b\""));
+  ASSERT_EQ(cls.signals.size(), 1);
+  ASSERT_EQ(cls.slots.size(), 3);
+  EXPECT_EQ(cls.slots[1].return_type.spelling, QStringLiteral("void"));
+  ASSERT_EQ(cls.slots[2].params.size(), 1);
+  EXPECT_EQ(cls.slots[2].params[0].name, QStringLiteral("limit"));
+  EXPECT_TRUE(cls.slots[2].params[0].type.is_const);
+  EXPECT_TRUE(cls.slots[2].params[0].type.is_reference);
+}
+
+TEST(ParserTest, RejectsUnsupportedClassMembers) {
+  for (const QString& member : {
+           QStringLiteral("MODEL tracks(display)"),
+           QStringLiteral("CLASS child(Other)"),
+           QStringLiteral("USE_ENUM(Qt::DateFormat)"),
+           QStringLiteral("PROP(int x PERSISTED)"),
+       }) {
+    Diagnostics diagnostics;
+    const QString source = QStringLiteral("class C { %1 }\n").arg(member);
+    Lexer lexer(QStringLiteral("bad.idl"), source, diagnostics);
+    Parser parser(QStringLiteral("bad.idl"), lexer.Scan(), source, diagnostics);
+    EXPECT_FALSE(parser.Parse().has_value()) << member.toStdString();
+    EXPECT_TRUE(diagnostics.HasErrors());
+  }
+}
+
+TEST(ParserTest, ParsesMultiWordQualifiersAndFoldedReferences) {
+  const QString source = QStringLiteral(
+      "POD Numbers(unsigned int a, unsigned long long b, long double ratio, "
+      "const QString &&name, short s)\n");
+  Diagnostics diagnostics;
+  Lexer lexer(QStringLiteral("numbers.idl"), source, diagnostics);
+  Parser parser(QStringLiteral("numbers.idl"), lexer.Scan(), source, diagnostics);
+  const auto ast = parser.Parse();
+
+  ASSERT_TRUE(ast.has_value()) << diagnostics.Format().toStdString();
+  ASSERT_EQ(ast->pods.size(), 1);
+  const auto& fields = ast->pods[0].fields;
+  ASSERT_EQ(fields.size(), 5);
+  EXPECT_EQ(fields[0].type.spelling, QStringLiteral("unsigned int"));
+  EXPECT_EQ(fields[0].type.base, QStringLiteral("int"));
+  EXPECT_EQ(fields[1].type.spelling, QStringLiteral("unsigned long long"));
+  EXPECT_EQ(fields[1].type.base, QStringLiteral("long"));
+  EXPECT_EQ(fields[2].type.spelling, QStringLiteral("long double"));
+  EXPECT_EQ(fields[2].type.base, QStringLiteral("double"));
+  EXPECT_EQ(fields[3].type.spelling, QStringLiteral("const QString &&"));
+  EXPECT_TRUE(fields[3].type.is_const);
+  EXPECT_TRUE(fields[3].type.is_reference);
+  EXPECT_EQ(fields[4].type.spelling, QStringLiteral("short"));
+  EXPECT_EQ(fields[4].type.base, QStringLiteral("short"));
+}
+
+TEST(ParserTest, ParsesUnnamedParamsAndImplicitVoidReturn) {
+  const QString source = QStringLiteral(
+      "class C {\n"
+      "  SIGNAL(updated(int, const QString &))\n"
+      "  SLOT(reset())\n"
+      "  SLOT(void named(int))\n"
+      "};\n");
+  Diagnostics diagnostics;
+  Lexer lexer(QStringLiteral("c.idl"), source, diagnostics);
+  Parser parser(QStringLiteral("c.idl"), lexer.Scan(), source, diagnostics);
+  const auto ast = parser.Parse();
+
+  ASSERT_TRUE(ast.has_value()) << diagnostics.Format().toStdString();
+  ASSERT_EQ(ast->classes.size(), 1);
+  const auto& cls = ast->classes[0];
+  ASSERT_EQ(cls.signals.size(), 1);
+  ASSERT_EQ(cls.signals[0].params.size(), 2);
+  EXPECT_FALSE(cls.signals[0].params[0].named);
+  EXPECT_TRUE(cls.signals[0].params[0].name.isEmpty());
+  EXPECT_TRUE(cls.signals[0].params[1].type.is_reference);
+  ASSERT_EQ(cls.slots.size(), 2);
+  EXPECT_EQ(cls.slots[0].name, QStringLiteral("reset"));
+  EXPECT_EQ(cls.slots[0].return_type.spelling, QStringLiteral("void"));
+  EXPECT_TRUE(cls.slots[0].params.isEmpty());
+  EXPECT_EQ(cls.slots[1].return_type.spelling, QStringLiteral("void"));
+}
+
+TEST(ParserTest, PreservesDefaultExpressionSourceSlices) {
+  const QString source = QStringLiteral(
+      "class C {\n"
+      "  PROP(QString text = QStringLiteral(\"a b\"))\n"
+      "  PROP(Mode mode = Mode::Idle)\n"
+      "  PROP(int neg = -1)\n"
+      "  PROP(QString escaped = \"a\\\"b\" READONLY)\n"
+      "};\n");
+  Diagnostics diagnostics;
+  Lexer lexer(QStringLiteral("defaults.idl"), source, diagnostics);
+  Parser parser(QStringLiteral("defaults.idl"), lexer.Scan(), source, diagnostics);
+  const auto ast = parser.Parse();
+
+  ASSERT_TRUE(ast.has_value()) << diagnostics.Format().toStdString();
+  ASSERT_EQ(ast->classes.size(), 1);
+  const auto& properties = ast->classes[0].properties;
+  ASSERT_EQ(properties.size(), 4);
+  EXPECT_TRUE(properties[0].has_default);
+  EXPECT_EQ(properties[0].default_value, QStringLiteral("QStringLiteral(\"a b\")"));
+  EXPECT_TRUE(properties[1].has_default);
+  EXPECT_EQ(properties[1].default_value, QStringLiteral("Mode::Idle"));
+  EXPECT_TRUE(properties[2].has_default);
+  EXPECT_EQ(properties[2].default_value, QStringLiteral("-1"));
+  EXPECT_TRUE(properties[3].has_default);
+  EXPECT_EQ(properties[3].default_value, QStringLiteral("\"a\\\"b\""));
+  EXPECT_EQ(properties[3].modifier, PropModifier::kReadOnly);
+}
+
+TEST(ParserTest, ParsesPropertyVisibilityModifiers) {
+  const QString source = QStringLiteral(
+      "class C {\n"
+      "  PROP(int constant CONSTANT)\n"
+      "  PROP(int push READPUSH)\n"
+      "  PROP(int source SOURCEONLYSETTER)\n"
+      "  PROP(int implicit)\n"
+      "};\n");
+  Diagnostics diagnostics;
+  Lexer lexer(QStringLiteral("mods.idl"), source, diagnostics);
+  Parser parser(QStringLiteral("mods.idl"), lexer.Scan(), source, diagnostics);
+  const auto ast = parser.Parse();
+
+  ASSERT_TRUE(ast.has_value()) << diagnostics.Format().toStdString();
+  ASSERT_EQ(ast->classes.size(), 1);
+  const auto& properties = ast->classes[0].properties;
+  ASSERT_EQ(properties.size(), 4);
+  EXPECT_EQ(properties[0].modifier, PropModifier::kConstant);
+  EXPECT_EQ(properties[1].modifier, PropModifier::kReadPush);
+  EXPECT_EQ(properties[2].modifier, PropModifier::kSourceOnlySetter);
+  EXPECT_EQ(properties[3].modifier, PropModifier::kReadPush);
+}
+
+TEST(ParserTest, RejectsMalformedPropModifiersAndDefaults) {
+  const struct {
+    QString member;
+    QString expected_message;
+  } cases[] = {
+      {QStringLiteral("PROP(int x READONLY READWRITE)"), QStringLiteral("multiple visibility")},
+      {QStringLiteral("PROP(int x BOGUS)"), QStringLiteral("expected '='")},
+      {QStringLiteral("PROP(int x = )"), QStringLiteral("default expression")},
+      {QStringLiteral("PROP(int x"), QStringLiteral("unterminated")},
+  };
+  for (const auto& test_case : cases) {
+    Diagnostics diagnostics;
+    const QString source =
+        QStringLiteral("class C { %1 }\n").arg(test_case.member);
+    Lexer lexer(QStringLiteral("bad.idl"), source, diagnostics);
+    Parser parser(QStringLiteral("bad.idl"), lexer.Scan(), source, diagnostics);
+    EXPECT_FALSE(parser.Parse().has_value()) << test_case.member.toStdString();
+    EXPECT_NE(diagnostics.Format().indexOf(test_case.expected_message), -1)
+        << diagnostics.Format().toStdString();
+  }
+}
+
+TEST(ParserTest, RejectsReferenceReturnAndPointerParameter) {
+  const struct {
+    QString member;
+    QString expected_message;
+  } cases[] = {
+      {QStringLiteral("SLOT(int &bad())"), QStringLiteral("reference")},
+      {QStringLiteral("SLOT(int *bad())"), QStringLiteral("pointer")},
+      {QStringLiteral("SLOT(void f(int *p))"), QStringLiteral("pointer")},
+  };
+  for (const auto& test_case : cases) {
+    Diagnostics diagnostics;
+    const QString source =
+        QStringLiteral("class C { %1 }\n").arg(test_case.member);
+    Lexer lexer(QStringLiteral("bad.idl"), source, diagnostics);
+    Parser parser(QStringLiteral("bad.idl"), lexer.Scan(), source, diagnostics);
+    EXPECT_FALSE(parser.Parse().has_value()) << test_case.member.toStdString();
+    EXPECT_NE(diagnostics.Format().indexOf(test_case.expected_message), -1)
+        << diagnostics.Format().toStdString();
+  }
 }

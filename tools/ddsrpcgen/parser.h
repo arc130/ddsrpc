@@ -24,13 +24,19 @@ class Parser {
   bool CheckIdentifier(const QString& text) const;
   bool Match(TokenKind kind);
   bool MatchIdentifier(const QString& text);
-  void Expect(TokenKind kind, const QString& what);
+  bool Expect(TokenKind kind, const QString& what);
   bool ExpectIdentifierText(const QString& text, const QString& what);
   void SkipSemicolonsAndNewlines();
 
   std::optional<PodDecl> ParsePod();
   std::optional<EnumDecl> ParseEnum();
   std::optional<TypeRef> ParseType();
+  std::optional<ClassDecl> ParseClass();
+  std::optional<PropDecl> ParseProp();
+  std::optional<SignalDecl> ParseSignal();
+  std::optional<SlotDecl> ParseSlot();
+  std::optional<QVector<ParamDecl>> ParseParams();
+  std::optional<TypeRef> ParseTypeFromSlice(int begin, int end);
 
   QString file_;
   QVector<Token> tokens_;
