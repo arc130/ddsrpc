@@ -52,7 +52,7 @@
 
 ### 3.1 文件与 IMPORT
 
-- 文件扩展名为 `.idl`，UTF-8，允许 `//` 行注释和 `/* ... */` 块注释。
+- 文件扩展名为 `.idl`，UTF-8，允许 `//` 行注释和 `/* ... */` 块注释。根文件和 IMPORT 目标都必须是 `.idl`。
 - 新导入指令：
 
   ```text
@@ -92,7 +92,7 @@ class Calculator {
 
     SLOT(int add(int a, int b))
     SLOT(void reset())
-    SLOT(QList<Point> history() const)
+    SLOT(QList<Point> history())
 };
 ```
 
@@ -185,7 +185,7 @@ ddsrpcgen --role types|service|client|all
 <stem>.ddsrpc.client.cpp
 ```
 
-- `types.h`：POD、枚举、QDataStream 运算符、metatype 注册、接口常量。服务端/客户端共用，不依赖 QObject/moc。
+- `types.h`：POD、枚举、QDataStream 运算符、inline `registerTypes()`（幂等注册生成类型的 metatype）、接口常量。服务端/客户端共用，不依赖 QObject/moc；生成的 Service/Client 构造时调用 `registerTypes()`。
 - `service.*`：`<Class>Service`，纯 C++ 抽象基类 + 通信实现。
 - `client.*`：`<Class>Client`，`Q_OBJECT`，Qt 信号 + 协程 RPC 门面。
 - 被 IMPORT 的文件按相同角色生成；生成的 types 头通过 `#include` 形成依赖。
@@ -206,6 +206,7 @@ ddsrpcgen --role types|service|client|all
 
 - 所有生成符号位于 `--namespace` 指定的命名空间；支持 `a::b` 形式。缺省为空（全局命名空间）。
 - 同一 IMPORT 图必须使用同一 namespace。
+- 生成的 class/类型名必须在目标 namespace 内唯一；`Options` 与生成的 Service/Client 成员名同属保留名空间。
 - 生成 class 只借用 `transport::DdsNode&`，不拥有 transport/node。
 
 ## 5. 运行时架构
@@ -296,7 +297,9 @@ ddsrpcgen --role types|service|client|all
 - schema hash 不匹配返回 `kSchemaMismatch`；服务端在解码请求后立即校验，客户端对每条回复和事件同样校验。
 - op id `0` 保留给“握手/属性快照”，其余 op 按 class 声明顺序从 1 开始。
 - 每个接口一个 schema hash：规范化声明（含顺序、类型、修饰符、默认值）与依赖类型定义取 SHA-256 后截断为 64 位。任何不兼容变更都会改变 hash。
-- 每个服务实例使用 `DdsNode::uuid()` 作为 instance UUID；用于诊断和属性 revision 的归属判断。
+- 每个服务实例使用 `DdsNode::uuid()` 作为 instance UUID（序列化为 16 字节）；用于诊断和属性 revision 的归属判断。
+- event kind 固定编码：`0` = SIGNAL，`1` = PROP。Reply 错误类别标记：`0` = RpcErrc，`1` = 其他/通用错误。错误码数值一经发布保持稳定，只追加。
+- 属性快照的 Reply 载荷为：instance UUID、属性数量、逐项 `(prop id, revision, value)`。
 
 ### 6.3 错误模型
 
@@ -311,14 +314,12 @@ ddsrpcgen --role types|service|client|all
   kSchemaMismatch
   kEncode
   kDecode
-  kTransport
-  kTimeout
   kCancelled
   kRemoteError
   kInternal
   ```
 
-- Transport 层错误原样透传（例如 `TransportErrc::kTimeout`、`kNotAccepted`）。
+- Transport 层错误原样透传（`TransportErrc::kTimeout`、`kNotAccepted`、`kClosed` 等），不包装成 `RpcErrc`。
 - 远端业务错误：wire 携带错误码、类别标记和文本；客户端尽量用 `RpcErrc` 重建；非本框架错误映射为 `kRemoteError`。
 - 客户端提供 `QString lastErrorText() const` 保存最近一次远端/协议错误文本；访问需线程安全。
 - 服务端捕获用户异常，回复 `kRemoteError`，生成/接收协程不被异常终止。
@@ -372,6 +373,7 @@ public:
   - 取消并汇合接收协程与全部在途请求处理协程；
   - 幂等；
   - 不注销 `prepare()` 建立的注册项（避免影响同节点其他 endpoint）；重复 `start()` 允许在 stop 后再次订阅。
+- 重复 `prepare()` 在已 prepared 状态下为幂等成功；运行中再次 `prepare()`/`start()` 返回 `kInvalidState`；未 start 时 `stop()` 为幂等成功。
 - 对象必须显式 `stop()` 后才可销毁；运行中析构视为使用错误。
 
 ### 7.3 请求分发与并发
@@ -464,12 +466,13 @@ signals:
   - 不等待服务上线，不阻塞；
   - `Subscribe(event_topic, kNotify)`，启动事件接收协程；
   - 启动后台握手协程；
-  - 返回成功。node 未 Running 时返回 `kInvalidState`。
+  - 返回成功。node 未 Running 时原样返回 DdsNode/Transport 错误（通常为 `kClosed`）。
+- 重复 `prepare()` 在已 prepared 状态下为幂等成功；运行中再次 `prepare()`/`start()` 返回 `kInvalidState`；未 start 时 `stop()` 为幂等成功。
 - `stop()`：
   - 置停止标志；
   - 关闭事件订阅邮箱并唤醒后台握手等待；
   - cancel + join 事件协程和握手协程；
-  - 幂等；把 `ready` 置回 false，再次 `start()` 时重新握手。
+  - 幂等；把 `ready` 置回 false、属性缓存重置为 IDL 默认值并清空 revision，再次 `start()` 时重新握手。
 - `~CalculatorClient()` 要求已 stop；运行中析构属于使用错误。
 
 ### 8.3 后台握手与 ready
@@ -478,8 +481,8 @@ signals:
   1. 通过 DdsNode 发送内部 op 0 的握手/属性快照请求。握手使用固定的 `RetryPolicy{500ms, 1}`，避免服务离线时长时间占住后台协程。实现不直接读取 `DdsTransport::CurrentLinkState()`；握手请求成功且信封校验通过，即视为链路建立并完成 schema 匹配。
   2. 成功：校验 wire/schema，应用属性快照，记录 instance UUID，置 `ready = true`，发 `readyChanged(true)`，退出。
   3. `kSchemaMismatch`/`kProtocol`：保存错误文本，发 `syncFailed(message)`，不再重试。
-  4. 超时/传输错误：按 `Options::handshake_interval` 协程休眠后重试，直到 stop。
-- 服务未上线时 `start()` 成功，`ready()` 为 false；服务上线后自动 ready。
+  4. 超时/传输错误：按 `Options::handshake_interval` 协程休眠后重试，直到 stop；`kCancelled`、`kClosed`、`kInvalidState` 视为停止条件，直接退出。
+- 服务未上线时 `start()` 成功，`ready()` 为 false；服务上线后自动 ready。`ready` 以原子标志实现，可由其他线程只读查询。
 - `refreshProperties()` 立即做一次同样语义的快照请求并返回其结果；可在 ready 后用于主动重同步。
 - 已经 ready 后不持续监控服务存活；后续 RPC 超时由调用方处理。
 - 服务重启/instance UUID 变化不属于第一版自动恢复范围；旧实例事件被忽略，调用方可 `refreshProperties()` 或重建客户端。
@@ -533,7 +536,7 @@ transport.Close(); transport.WaitClosed()
 
 - 所有 endpoint 方法在 node 的 fiber 执行域内调用；`start/stop` 是协程方法。
 - 客户端 `prepare/start` 均不阻塞等待服务；只有实际 RPC 调用按 `request_retry` 等待结果。
-- 服务端每个请求独立 Coro task；无 framework 并发限制。
+- 服务端每个请求独立 Coro task；无框架并发限制。
 - 显式 stop 是销毁前的前置条件。运行时析构只做断言/诊断，不替调用方在非协程上下文 join。
 - 同一 DdsNode 上的同一服务名不能同时是 client 和 service；由 Transport 返回错误。
 - 生成属性状态不跨线程访问；跨线程使用 endpoint 不受支持。
@@ -551,7 +554,7 @@ third_party/Transport   -> 1c79cd5 (0.6.0)
 - 不初始化 Transport 自带的旧 AsyncTask 子模块；CMake 将 `ASYNCTASK_DIR` 指向根 `third_party/AsyncTask`。
 - CMake 提供 `DDSRPC_TRANSPORT_DIR`、`DDSRPC_ASYNCTASK_DIR` 覆盖变量，缺省指向上述子模块；子模块缺失时 configure 直接给出明确错误。
 - 需在 WSL/Ubuntu 安装 `libqt5serialport5-dev`；Boost 1.72 已安装在 `/usr/local`，Qt 5.12.8、CMake 3.16 可用。
-- 这是一个显式的兼容性风险：Transport 0.6.0 上游锁的是 AsyncTask `6f4225`。实现阶段首先验证 Transport 能针对 `d231d64` 构建；若失败，先报告具体不兼容，不静默回退。
+- 两个显式兼容性风险，实现阶段先做 spike 验证：Transport 0.6.0 上游锁的是 AsyncTask `6f4225`，本工程改用 `d231d64`；AsyncTask README 声称 Boost 1.89，而当前 WSL 为 1.72。若编译失败，先报告具体缺项（升级 AsyncTask/Boost），不静默回退。
 
 ### 11.2 CMake
 
@@ -561,15 +564,15 @@ third_party/Transport   -> 1c79cd5 (0.6.0)
 - `ddsrpc_runtime`：静态运行时库，别名 `ddsrpc::runtime`；
 - `ddsrpcgen_tests`；
 - `ddsrpc_runtime_tests`；
-- CMake 示例 `hello_server` / `hello_client` 或单进程双角色示例。
+- CMake 示例 `hello_server` 与 `hello_client` 两个可执行文件（fake provider 下同机成对运行）。
 
 接入函数：
 
 ```cmake
 ddsrpc_add_idl(<target>
     ROLES service|client|"service;client"
-    NAMESPACE <ns>
-    INCLUDE_DIRS <dirs...>
+    [NAMESPACE <ns>]
+    [INCLUDE_DIRS <dirs...>]
     IDL <root.idl...>)
 ```
 
@@ -617,7 +620,7 @@ ddsrpc_add_idl(<target>
 - handler 返回 `RpcErrc` 与抛异常两条错误路径；
 - SIGNAL 发布/订阅；
 - 属性初始快照、变更推送、READWRITE/READPUSH 远端写入；
-- 不支持远端写的属性不会生成客户端 setter（由编译通过验证）；
+- 不支持远端写的属性不生成客户端 setter（在生成器测试中断言生成文本）；
 - schema hash 不匹配；
 - 生命周期误用：node 未 Running 时 start、重复 stop、stop 时存在在途请求；
 - 先 client 后 service 的自动握手；
