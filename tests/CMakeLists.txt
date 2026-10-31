@@ -1,4 +1,5 @@
 add_executable(ddsrpcgen_tests
+  generator/import_resolver_test.cpp
   generator/lexer_test.cpp
   generator/parser_test.cpp
 )
