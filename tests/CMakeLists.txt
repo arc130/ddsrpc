@@ -11,6 +11,8 @@ add_test(NAME ddsrpcgen_tests COMMAND ddsrpcgen_tests)
 add_executable(ddsrpc_runtime_tests
   runtime/runtime_test_main.cpp
   runtime/error_wire_test.cpp
+  runtime/task_group_test.cpp
+  runtime/service_base_test.cpp
 )
 # AsyncTask 头文件来自根级 ${DDSRPC_ASYNCTASK_DIR}（即 transport 实际链接的
 # d231d64 子模块）；Transport 自带的 third_party/AsyncTask 在本工作树未检出。
