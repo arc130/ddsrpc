@@ -71,7 +71,11 @@ Token Lexer::MakeToken(TokenKind kind, int start_offset, const SourceLocation& s
 void Lexer::ScanPreprocessor() {
   const SourceLocation start{line_, column_, offset_};
   const int start_offset = offset_;
-  while (!AtEnd() && Peek() != QLatin1Char('\n')) Advance();
+  // Stop before either newline character so CRLF input does not leak '\r'
+  // into the token text; SkipWhitespaceAndComments() consumes the line ending.
+  while (!AtEnd() && Peek() != QLatin1Char('\n') && Peek() != QLatin1Char('\r')) {
+    Advance();
+  }
   tokens_.push_back(MakeToken(TokenKind::Preprocessor, start_offset, start));
 }
 
@@ -80,7 +84,8 @@ Token Lexer::ScanString() {
   const int start_offset = offset_;
   Advance();  // opening quote
   QString value;
-  while (!AtEnd() && Peek() != QLatin1Char('"')) {
+  while (!AtEnd() && Peek() != QLatin1Char('"') && Peek() != QLatin1Char('\n') &&
+         Peek() != QLatin1Char('\r')) {
     if (Peek() == QLatin1Char('\\') && Peek(1) == QLatin1Char('"')) {
       value += QLatin1Char('"');
       Advance();
@@ -94,7 +99,10 @@ Token Lexer::ScanString() {
       Advance();
     }
   }
-  if (AtEnd()) {
+  // Raw line endings inside a quoted string are errors. Leave the newline
+  // unconsumed so the outer scan loop can treat it as ordinary whitespace and
+  // keep lexing the rest of the file.
+  if (AtEnd() || Peek() == QLatin1Char('\n') || Peek() == QLatin1Char('\r')) {
     diagnostics_.Error(file_, start, QStringLiteral("unterminated string literal"));
     Token token;
     token.kind = TokenKind::String;
@@ -133,11 +141,6 @@ Token Lexer::ScanIdentifier() {
 }
 
 QVector<Token> Lexer::Scan() {
-  tokens_.clear();
-  offset_ = 0;
-  line_ = 1;
-  column_ = 1;
-
   while (true) {
     SkipWhitespaceAndComments();
     if (AtEnd()) break;

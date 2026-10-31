@@ -1,4 +1,5 @@
 #pragma once
+#include <QChar>
 #include <QString>
 #include <QVector>
 
@@ -7,10 +8,16 @@
 
 namespace ddsrpcgen {
 
+// A Lexer is single-use: construct one instance per source text and call Scan()
+// exactly once. Reusing an instance for a second Scan() is unsupported. Errors
+// are appended to the caller-owned Diagnostics and are never cleared by the
+// lexer, so one Diagnostics may collect errors from several files.
 class Lexer {
  public:
   Lexer(QString file, QString source, Diagnostics& diagnostics);
 
+  // Tokenizes the entire source and returns tokens terminated by TokenKind::End.
+  // Call exactly once per Lexer instance.
   [[nodiscard]] QVector<Token> Scan();
 
  private:
