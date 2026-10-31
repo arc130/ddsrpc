@@ -353,7 +353,7 @@ CLI
 
 - magic/version 不匹配返回 `kProtocol`。
 - schema hash 不匹配返回 `kSchemaMismatch`；服务端在解码请求后立即校验，客户端对每条回复和事件同样校验。
-- op id `0` 保留给“握手/属性快照”，其余 op 按 class 声明顺序从 1 开始。
+- op id `0` 保留给“握手/属性快照”；远端可写属性的 setter op 按属性声明顺序从 1 开始，随后 SLOT op 在同一序列继续递增。该顺序由 schema hash 固定。
 - **一个 IDL 文件对应一个 schema hash**：规范化该文件的接口/类型声明（含顺序、类型、修饰符、默认值）及 IMPORT 图中依赖的类型声明，取 SHA-256 后截断为 64 位。任何不兼容变更都会改变 hash；客户端与同一 IDL 生成的服务端 hash 相等才视为匹配。
 - 不引入 instance UUID、会话 ID 或服务实例跟踪；schema 匹配是应用层握手的唯一判据。
 - event kind 固定编码：`0` = SIGNAL，`1` = PROP。Reply 错误类别标记：`0` = RpcErrc，`1` = 其他/通用错误。错误码数值一经发布保持稳定，只追加。
