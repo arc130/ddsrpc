@@ -3,6 +3,8 @@ add_library(ddsrpcgen_lib STATIC
   import_resolver.cpp
   lexer.cpp
   parser.cpp
+  schema.cpp
+  semantic.cpp
 )
 target_include_directories(ddsrpcgen_lib PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(ddsrpcgen_lib PUBLIC Qt5::Core)
