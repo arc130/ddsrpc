@@ -287,7 +287,6 @@ ddsrpcgen --role types|service|client|all
 | 字段 | 类型 |
 |---|---|
 | magic / wire version / schema hash | 同上 |
-| instance uuid | 16 字节 |
 | event kind | `quint8`（signal / property） |
 | event id | `quint32` |
 | revision | `quint64` |
@@ -296,10 +295,10 @@ ddsrpcgen --role types|service|client|all
 - magic/version 不匹配返回 `kProtocol`。
 - schema hash 不匹配返回 `kSchemaMismatch`；服务端在解码请求后立即校验，客户端对每条回复和事件同样校验。
 - op id `0` 保留给“握手/属性快照”，其余 op 按 class 声明顺序从 1 开始。
-- 每个接口一个 schema hash：规范化声明（含顺序、类型、修饰符、默认值）与依赖类型定义取 SHA-256 后截断为 64 位。任何不兼容变更都会改变 hash。
-- 每个服务实例使用 `DdsNode::uuid()` 作为 instance UUID（序列化为 16 字节）；用于诊断和属性 revision 的归属判断。
+- **一个 IDL 文件对应一个 schema hash**：规范化该文件的接口/类型声明（含顺序、类型、修饰符、默认值）及 IMPORT 图中依赖的类型声明，取 SHA-256 后截断为 64 位。任何不兼容变更都会改变 hash；客户端与同一 IDL 生成的服务端 hash 相等才视为匹配。
+- 不引入 instance UUID、会话 ID 或服务实例跟踪；schema 匹配是应用层握手的唯一判据。
 - event kind 固定编码：`0` = SIGNAL，`1` = PROP。Reply 错误类别标记：`0` = RpcErrc，`1` = 其他/通用错误。错误码数值一经发布保持稳定，只追加。
-- 属性快照的 Reply 载荷为：instance UUID、属性数量、逐项 `(prop id, revision, value)`。
+- 属性快照的 Reply 载荷为：属性数量、逐项 `(prop id, revision, value)`。
 
 ### 6.3 错误模型
 
@@ -401,7 +400,7 @@ public:
   - 返回 `Coro::Result<void>`。
 - `CONSTANT` 属性不生成服务端 setter，只在初始化时使用默认值。
 - `READONLY` / `SOURCEONLYSETTER` / `READWRITE` / `READPUSH` 服务端都可发布变更；远端可写性见第 9 节。
-- 属性快照通过内部 op 0 处理，返回 service instance UUID 和全部属性的 `(prop id, revision, value)`。
+- 属性快照通过内部 op 0 处理，返回全部属性的 `(prop id, revision, value)`。
 
 ### 7.5 SIGNAL
 
@@ -479,13 +478,13 @@ signals:
 
 - 后台协程循环：
   1. 通过 DdsNode 发送内部 op 0 的握手/属性快照请求。握手使用固定的 `RetryPolicy{500ms, 1}`，避免服务离线时长时间占住后台协程。实现不直接读取 `DdsTransport::CurrentLinkState()`；握手请求成功且信封校验通过，即视为链路建立并完成 schema 匹配。
-  2. 成功：校验 wire/schema，应用属性快照，记录 instance UUID，置 `ready = true`，发 `readyChanged(true)`，退出。
+  2. 成功：校验 wire/schema，应用属性快照并重置属性 revision 基线，置 `ready = true`，发 `readyChanged(true)`，退出。
   3. `kSchemaMismatch`/`kProtocol`：保存错误文本，发 `syncFailed(message)`，不再重试。
   4. 超时/传输错误：按 `Options::handshake_interval` 协程休眠后重试，直到 stop；`kCancelled`、`kClosed`、`kInvalidState` 视为停止条件，直接退出。
 - 服务未上线时 `start()` 成功，`ready()` 为 false；服务上线后自动 ready。`ready` 以原子标志实现，可由其他线程只读查询。
 - `refreshProperties()` 立即做一次同样语义的快照请求并返回其结果；可在 ready 后用于主动重同步。
 - 已经 ready 后不持续监控服务存活；后续 RPC 超时由调用方处理。
-- 服务重启/instance UUID 变化不属于第一版自动恢复范围；旧实例事件被忽略，调用方可 `refreshProperties()` 或重建客户端。
+- 服务重启不自动恢复：本版不检测重启、不自动重发在途请求，也不自动重新快照；调用方可 `refreshProperties()` 重置 revision 基线并重新同步，或重建客户端。schema 不变且服务已恢复时，普通 RPC 可继续使用。
 
 ### 8.4 事件接收
 
@@ -524,7 +523,7 @@ signals:
 
 - 属性的初始值来自 IDL 默认表达式；客户端先以该值初始化缓存，握手成功后由服务端快照覆盖。
 - 快照与事件均带 revision；客户端只接受更高的 revision。先订阅事件、后请求快照，避免启动窗口丢更新。
-- 服务端属性变更 revision 单调递增；属性事件和 SIGNAL 事件共享同一实例内的事件序号空间。
+- 服务端属性变更 revision 单调递增；属性事件和 SIGNAL 事件共享同一服务运行期间的事件序号空间。revision 只用于同一轮服务运行内的排序/去重，不承担实例身份识别；`refreshProperties()` 会用快照重置客户端 revision 基线。
 - `PERSISTED` 不在本版支持。
 
 ## 10. 生命周期与线程契约
@@ -662,7 +661,7 @@ ddsrpc_add_idl(<target>
 - 服务端无并发上限，慢处理器/请求洪水可能导致协程过多。
 - READPUSH/READWRITE 都等待服务端确认，和 QtRO 的异步 push 语义不完全相同。
 - 客户端不能直接发布 SIGNAL/PROP，也没有上行单向调用；客户端→服务端只走 SLOT 请求-响应。
-- 服务重启后的客户端自动恢复不在本版。
+- 服务重启后的客户端自动恢复不在本版；不引入 UUID/会话跟踪，靠 `refreshProperties()` 或重建客户端恢复。
 - qmake 只是消费示例，不是完整构建体系。
 - 仅验证 FakeDdsProvider；真实 Fast DDS 路径待后续验证。
 
@@ -670,7 +669,7 @@ ddsrpc_add_idl(<target>
 
 - `MODEL/CLASS/FLAG/USE_ENUM`、`PERSISTED`、花括号 POD；
 - 标准 CDR/Fast DDS 类型映射与其他语言互通；
-- 服务重启/instance 变更自动重同步；
+- 服务重启后的自动重同步（如以后引入 session/instance 机制）；
 - 并发上限、请求去重、背压；
 - qmake 与 CMake 等价支持；
 - 可观测性与指标。
