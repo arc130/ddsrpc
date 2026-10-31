@@ -83,6 +83,7 @@ bool ImportResolver::LoadFile(const QString& canonical_path, LoadedProgram& prog
     }
   }
 
+  QVector<QString> resolved_imports;
   if (ok) {
     for (const ImportDecl& import : ast->imports) {
       const auto resolved = ResolveImport(canonical_path, import);
@@ -108,6 +109,9 @@ bool ImportResolver::LoadFile(const QString& canonical_path, LoadedProgram& prog
         ok = false;
         break;
       }
+      if (!resolved_imports.contains(imported_path)) {
+        resolved_imports.append(imported_path);
+      }
     }
   }
 
@@ -117,7 +121,8 @@ bool ImportResolver::LoadFile(const QString& canonical_path, LoadedProgram& prog
     return false;
   }
   states_[canonical_path] = Visit::kDone;
-  program.files.push_back(ImportedFile{canonical_path, std::move(*ast)});
+  program.files.push_back(
+      ImportedFile{canonical_path, std::move(*ast), std::move(resolved_imports)});
   return true;
 }
 

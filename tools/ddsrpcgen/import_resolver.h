@@ -14,6 +14,11 @@ namespace ddsrpcgen {
 struct ImportedFile {
   QString canonical_path;
   AstFile ast;
+  // Canonical paths of the files named by this file's top-level IMPORT
+  // declarations, in declaration order. Repeated imports of the same resolved
+  // file are kept once. Semantic analysis derives the exact import graph from
+  // these edges instead of re-resolving raw IMPORT spellings.
+  QVector<QString> resolved_imports;
 };
 
 struct LoadedProgram {

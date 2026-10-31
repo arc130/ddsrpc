@@ -1,6 +1,5 @@
 #include "semantic.h"
 
-#include <QDir>
 #include <QFileInfo>
 #include <QHash>
 #include <QSet>
@@ -66,6 +65,19 @@ namespace {
 [[nodiscard]] bool IsReservedIdentifier(const QString& name) {
   if (name.contains(QStringLiteral("__"))) return true;
   return name.size() >= 2 && name.at(0) == QLatin1Char('_') && name.at(1).isUpper();
+}
+
+// Generated code includes Qt headers, where signals/slots/emit are macros
+// unless the consuming project defines QT_NO_KEYWORDS. Qt owns the whole Q_
+// macro namespace as well (Q_OBJECT, Q_PROPERTY, Q_SIGNALS, ...), so any such
+// identifier would break the generated C++ regardless of where it appears.
+[[nodiscard]] bool IsQtReservedName(const QString& name) {
+  static const QSet<QString> kKeywords = {
+      QStringLiteral("signals"),
+      QStringLiteral("slots"),
+      QStringLiteral("emit"),
+  };
+  return kKeywords.contains(name) || name.startsWith(QStringLiteral("Q_"));
 }
 
 [[nodiscard]] bool IsReservedMemberName(const QString& name) {
@@ -143,6 +155,14 @@ struct DeclRecord {
   QString kind;
 };
 
+// Generated type symbols declared by one file. Resolution uses these per-file
+// tables; only the file itself and its transitive imports are visible.
+struct FileSymbols {
+  QHash<QString, EnumModel> enums;
+  QHash<QString, EnumModel> enum_aliases;
+  QSet<QString> pods;
+};
+
 struct ResolvedType {
   QString cpp_type;
   bool is_reference = false;
@@ -162,6 +182,13 @@ class SemanticAnalyzer {
   [[nodiscard]] std::optional<Model> Run() {
     BuildSkeletons();
     BuildImportEdges();
+    BuildImportClosures();
+    BuildVisibleSymbols();
+    // Ambiguous output names make downstream schema/emitter work meaningless;
+    // stop before resolving declarations or computing schemas.
+    const int before_stem_check = diagnostics_.All().size();
+    RejectDuplicateOutputStems();
+    if (diagnostics_.All().size() != before_stem_check) return std::nullopt;
     ResolveDeclarations();
     SortPods();
     ComputeSchemas();
@@ -191,6 +218,10 @@ class SemanticAnalyzer {
           file, loc,
           QStringLiteral("'%1' is a reserved C++ identifier and cannot be used as %2")
               .arg(name, what));
+    } else if (IsQtReservedName(name)) {
+      diagnostics_.Error(
+          file, loc,
+          QStringLiteral("'%1' is reserved by Qt and cannot be used as %2").arg(name, what));
     }
   }
 
@@ -230,6 +261,7 @@ class SemanticAnalyzer {
     model_.name_space = name_space_;
     const QVector<ImportedFile>& files = program_.files;
     model_.files.reserve(files.size());
+    file_symbols_.reserve(files.size());
     for (int index = 0; index < files.size(); ++index) {
       const AstFile& ast = files[index].ast;
       FileModel file;
@@ -237,8 +269,9 @@ class SemanticAnalyzer {
       file.stem = QFileInfo(file.path).completeBaseName();
       file.name_space = name_space_;
       file.directives = ast.directives;
-      for (const ImportDecl& import : ast.imports) file.imports.append(import.path);
+      file.imports = files[index].resolved_imports;
 
+      FileSymbols symbols;
       for (const EnumDecl& decl : ast.enums) {
         ValidateIdentifier(decl.name, QStringLiteral("an ENUM name"), file.path, decl.loc);
         EnumModel model = MakeEnum(decl.name, decl.name, QString(), decl.values);
@@ -247,7 +280,9 @@ class SemanticAnalyzer {
                      QStringLiteral("ENUM"));
         RegisterName(&emitted_names_, model.idl_name, file.path, decl.loc,
                      QStringLiteral("ENUM"));
-        if (!enums_.contains(model.idl_name)) enums_.insert(model.idl_name, model);
+        symbols.enums.insert(model.idl_name, model);
+        type_records_.insert(model.idl_name,
+                             DeclRecord{file.path, decl.loc, QStringLiteral("ENUM")});
         file.enums.append(model);
       }
 
@@ -257,8 +292,8 @@ class SemanticAnalyzer {
         RegisterName(&emitted_names_, decl.name, file.path, decl.loc, QStringLiteral("POD"));
         PodModel model;
         model.name = decl.name;
-        model.fields = decl.fields;
-        if (!pods_.contains(model.name)) pods_.insert(model.name, model);
+        symbols.pods.insert(model.name);
+        type_records_.insert(model.name, DeclRecord{file.path, decl.loc, QStringLiteral("POD")});
         file.pods.append(model);
       }
 
@@ -288,15 +323,21 @@ class SemanticAnalyzer {
           ValidateEnum(model, file.path, enum_decl.loc);
           RegisterName(&emitted_names_, model.cpp_name, file.path, enum_decl.loc,
                        QStringLiteral("class ENUM"));
-          if (!enums_.contains(model.cpp_name)) enums_.insert(model.cpp_name, model);
           const QString alias = decl.name + QStringLiteral("::") + model.idl_name;
-          if (!enum_aliases_.contains(alias)) enum_aliases_.insert(alias, model);
+          symbols.enums.insert(model.cpp_name, model);
+          symbols.enum_aliases.insert(alias, model);
+          type_records_.insert(
+              model.cpp_name,
+              DeclRecord{file.path, enum_decl.loc, QStringLiteral("class ENUM")});
+          type_records_.insert(alias, DeclRecord{file.path, enum_decl.loc,
+                                                 QStringLiteral("class ENUM alias")});
           cls.class_enums.append(model);
         }
         file.classes.append(cls);
       }
 
-      files_by_stem_[file.stem].append(index);
+      index_by_path_.insert(file.path, index);
+      file_symbols_.append(std::move(symbols));
       model_.files.append(std::move(file));
     }
   }
@@ -305,29 +346,17 @@ class SemanticAnalyzer {
     direct_imports_.resize(program_.files.size());
     for (int index = 0; index < program_.files.size(); ++index) {
       const ImportedFile& imported = program_.files[index];
-      const QString importer_dir = QFileInfo(imported.canonical_path).absolutePath();
       QSet<int> edges;
-      for (const ImportDecl& import : imported.ast.imports) {
-        // Prefer resolving the declaration against the importer directory;
-        // that also follows symlinks whose file name differs from the IMPORT
-        // argument. Include-directory imports fall back to the source stem.
-        const QString expected =
-            QFileInfo(QDir(importer_dir).filePath(import.path)).canonicalFilePath();
-        int chosen = -1;
-        if (!expected.isEmpty()) {
-          for (int candidate = 0; candidate < program_.files.size(); ++candidate) {
-            if (program_.files.at(candidate).canonical_path == expected) {
-              chosen = candidate;
-              break;
-            }
-          }
+      for (const QString& resolved_import : imported.resolved_imports) {
+        const auto found = index_by_path_.constFind(resolved_import);
+        if (found == index_by_path_.constEnd()) {
+          diagnostics_.Error(
+              imported.canonical_path, SourceLocation{},
+              QStringLiteral("internal error: resolved import '%1' was not loaded")
+                  .arg(resolved_import));
+          continue;
         }
-        if (chosen < 0) {
-          const QString stem = QFileInfo(import.path).completeBaseName();
-          const QVector<int> candidates = files_by_stem_.value(stem);
-          if (!candidates.isEmpty()) chosen = candidates.first();
-        }
-        if (chosen >= 0 && chosen != index) edges.insert(chosen);
+        if (found.value() != index) edges.insert(found.value());
       }
       QVector<int> edge_list;
       for (const int edge : edges) edge_list.append(edge);
@@ -336,23 +365,91 @@ class SemanticAnalyzer {
     }
   }
 
+  void BuildImportClosures() {
+    closures_.resize(direct_imports_.size());
+    for (int start = 0; start < direct_imports_.size(); ++start) {
+      QSet<int> seen;
+      seen.insert(start);
+      std::function<void(int)> visit = [&](int node) {
+        for (const int dependency : direct_imports_.at(node)) {
+          if (seen.contains(dependency)) continue;
+          seen.insert(dependency);
+          visit(dependency);
+        }
+      };
+      visit(start);
+      QVector<int> dependencies;
+      for (const int dependency : seen) {
+        if (dependency != start) dependencies.append(dependency);
+      }
+      std::sort(dependencies.begin(), dependencies.end());
+      closures_[start] = dependencies;
+    }
+  }
+
+  void BuildVisibleSymbols() {
+    visible_symbols_.resize(file_symbols_.size());
+    for (int index = 0; index < file_symbols_.size(); ++index) {
+      FileSymbols visible;
+      const auto merge = [&visible](const FileSymbols& source) {
+        for (auto it = source.enums.constBegin(); it != source.enums.constEnd(); ++it) {
+          if (!visible.enums.contains(it.key())) visible.enums.insert(it.key(), it.value());
+        }
+        for (auto it = source.enum_aliases.constBegin();
+             it != source.enum_aliases.constEnd(); ++it) {
+          if (!visible.enum_aliases.contains(it.key())) {
+            visible.enum_aliases.insert(it.key(), it.value());
+          }
+        }
+        visible.pods.unite(source.pods);
+      };
+      merge(file_symbols_.at(index));
+      for (const int dependency : closures_.at(index)) {
+        merge(file_symbols_.at(dependency));
+      }
+      visible_symbols_[index] = std::move(visible);
+    }
+  }
+
+  void RejectDuplicateOutputStems() {
+    QHash<QString, QString> first_path;
+    for (const FileModel& file : model_.files) {
+      const auto existing = first_path.constFind(file.stem);
+      if (existing == first_path.constEnd()) {
+        first_path.insert(file.stem, file.path);
+        continue;
+      }
+      diagnostics_.Error(
+          file.path, SourceLocation{},
+          QStringLiteral("duplicate output stem '%1': '%2' and '%3' would generate the same "
+                         "output files")
+              .arg(file.stem, existing.value(), file.path));
+    }
+  }
+
   void ResolveDeclarations() {
     for (int index = 0; index < model_.files.size(); ++index) {
       FileModel& file = model_.files[index];
       const AstFile& ast = program_.files.at(index).ast;
       for (int pod = 0; pod < file.pods.size(); ++pod) {
-        BuildPod(file.pods[pod], ast.pods.at(pod), file.path);
+        BuildPod(file.pods[pod], ast.pods.at(pod), index, file.path);
       }
       for (int cls = 0; cls < file.classes.size(); ++cls) {
-        BuildClass(file.classes[cls], ast.classes.at(cls), file.path);
+        BuildClass(file.classes[cls], ast.classes.at(cls), index, file.path);
       }
     }
   }
 
-  void BuildPod(PodModel& pod, const PodDecl& decl, const QString& file) {
+  void BuildPod(PodModel& pod, const PodDecl& decl, int file_index, const QString& file) {
     QSet<QString> field_names;
     for (const FieldDecl& field : decl.fields) {
       ValidateIdentifier(field.name, QStringLiteral("a POD field name"), file, field.loc);
+      if (field.name == pod.name) {
+        diagnostics_.Error(
+            file, field.loc,
+            QStringLiteral("field '%1' in POD '%2' cannot have the same name as the POD")
+                .arg(field.name, pod.name));
+      }
       if (field_names.contains(field.name)) {
         diagnostics_.Error(
             file, field.loc,
@@ -360,25 +457,31 @@ class SemanticAnalyzer {
       } else {
         field_names.insert(field.name);
       }
-      const ResolvedType type = ResolveType(field.type, nullptr, file, field.loc);
+      const ResolvedType type =
+          ResolveType(field.type, nullptr, file_index, file, field.loc);
       if (type.is_void) {
         diagnostics_.Error(file, field.loc,
                            QStringLiteral("field '%1' in POD '%2' cannot have type 'void'")
                                .arg(field.name, pod.name));
       }
+      PodFieldModel model;
+      model.name = field.name;
+      model.cpp_type = type.cpp_type;
+      pod.fields.append(model);
     }
-    pod.fields = decl.fields;
   }
 
   [[nodiscard]] ResolvedType ResolveType(const TypeRef& type,
                                          const QHash<QString, EnumModel>* class_enums,
-                                         const QString& file, const SourceLocation& loc) {
+                                         int file_index, const QString& file,
+                                         const SourceLocation& loc) {
     ResolvedType result;
     result.is_reference = type.is_reference;
     if (type.spelling.contains(QLatin1Char('*'))) {
       diagnostics_.Error(file, loc, QStringLiteral("pointer types are not supported"));
     }
 
+    const FileSymbols& visible = visible_symbols_.at(file_index);
     bool has_enum = false;
     EnumModel enum_model;
     if (type.args.isEmpty()) {
@@ -390,16 +493,16 @@ class SemanticAnalyzer {
         }
       }
       if (!has_enum) {
-        const auto alias = enum_aliases_.constFind(type.base);
-        if (alias != enum_aliases_.constEnd()) {
+        const auto alias = visible.enum_aliases.constFind(type.base);
+        if (alias != visible.enum_aliases.constEnd()) {
           enum_model = alias.value();
           has_enum = true;
         }
       }
       if (!has_enum) {
-        const auto global = enums_.constFind(type.base);
-        if (global != enums_.constEnd()) {
-          enum_model = global.value();
+        const auto known = visible.enums.constFind(type.base);
+        if (known != visible.enums.constEnd()) {
+          enum_model = known.value();
           has_enum = true;
         }
       }
@@ -413,18 +516,27 @@ class SemanticAnalyzer {
       result.is_void = spelling == QStringLiteral("void");
     } else if (has_enum) {
       core = Qualify(enum_model.cpp_name, name_space_);
-    } else if (pods_.contains(type.base)) {
-      core = Qualify(type.base, name_space_);
-    } else if (enums_.contains(type.base)) {
+    } else if (visible.pods.contains(type.base)) {
       core = Qualify(type.base, name_space_);
     } else {
+      if (type.args.isEmpty()) {
+        const auto declared = type_records_.constFind(type.base);
+        if (declared != type_records_.constEnd()) {
+          diagnostics_.Error(
+              file, loc,
+              QStringLiteral("type '%1' is declared in '%2' but is not visible here; add an "
+                             "IMPORT for that file")
+                  .arg(type.base, declared->file));
+        }
+      }
       core = type.base;
     }
 
     if (!type.args.isEmpty()) {
       QStringList arguments;
       for (const TypeRef& argument : type.args) {
-        arguments.append(ResolveType(argument, class_enums, file, loc).cpp_type);
+        arguments.append(
+            ResolveType(argument, class_enums, file_index, file, loc).cpp_type);
       }
       core += QLatin1Char('<') + arguments.join(QStringLiteral(", ")) + QLatin1Char('>');
     }
@@ -437,7 +549,7 @@ class SemanticAnalyzer {
 
   [[nodiscard]] QVector<ParamModel> BuildParams(
       const QVector<ParamDecl>& params, const QHash<QString, EnumModel>* class_enums,
-      const QString& file) {
+      int file_index, const QString& file) {
     QVector<ParamModel> result;
     QSet<QString> names;
     int unnamed_index = 0;
@@ -449,7 +561,8 @@ class SemanticAnalyzer {
       if (decl.named) {
         ValidateIdentifier(model.name, QStringLiteral("a parameter name"), file, decl.loc);
       }
-      const ResolvedType type = ResolveType(decl.type, class_enums, file, decl.loc);
+      const ResolvedType type =
+          ResolveType(decl.type, class_enums, file_index, file, decl.loc);
       if (type.is_void) {
         diagnostics_.Error(file, decl.loc,
                            QStringLiteral("parameter '%1' cannot have type 'void'")
@@ -467,7 +580,8 @@ class SemanticAnalyzer {
     return result;
   }
 
-  void BuildClass(ClassModel& cls, const ClassDecl& decl, const QString& file) {
+  void BuildClass(ClassModel& cls, const ClassDecl& decl, int file_index,
+                  const QString& file) {
     QHash<QString, EnumModel> class_enums;
     for (const EnumModel& model : cls.class_enums) {
       class_enums.insert(model.idl_name, model);
@@ -504,7 +618,8 @@ class SemanticAnalyzer {
     int property_id = 0;
     int op = 0;
     for (const PropDecl& property : decl.properties) {
-      const ResolvedType type = ResolveType(property.type, &class_enums, file, property.loc);
+      const ResolvedType type =
+          ResolveType(property.type, &class_enums, file_index, file, property.loc);
       if (property.persisted) {
         diagnostics_.Error(file, property.loc, QStringLiteral("PERSISTED is not supported"));
       }
@@ -542,14 +657,14 @@ class SemanticAnalyzer {
     for (const SignalDecl& signal : decl.signals) {
       SignalModel model;
       model.name = signal.name;
-      model.params = BuildParams(signal.params, &class_enums, file);
+      model.params = BuildParams(signal.params, &class_enums, file_index, file);
       model.event_id = ++event_id;
       cls.signals.append(model);
     }
 
     for (const SlotDecl& slot : decl.slots) {
       const ResolvedType return_type =
-          ResolveType(slot.return_type, &class_enums, file, slot.loc);
+          ResolveType(slot.return_type, &class_enums, file_index, file, slot.loc);
       if (return_type.is_reference) {
         diagnostics_.Error(
             file, slot.loc,
@@ -558,7 +673,7 @@ class SemanticAnalyzer {
       SlotModel model;
       model.name = slot.name;
       model.return_cpp_type = return_type.cpp_type;
-      model.params = BuildParams(slot.params, &class_enums, file);
+      model.params = BuildParams(slot.params, &class_enums, file_index, file);
       model.op = ++op;
       cls.slots.append(model);
     }
@@ -570,6 +685,13 @@ class SemanticAnalyzer {
                               const QString& file) {
     QHash<QString, QString> service;
     QHash<QString, QString> client;
+    // A member or alias with the enclosing class name would be parsed as a
+    // (malformed) constructor, so seed each generated class with its own name.
+    const QString service_class = cls.idl_name + QStringLiteral("Service");
+    const QString client_class = cls.idl_name + QStringLiteral("Client");
+    service.insert(service_class,
+                   QStringLiteral("generated class '%1'").arg(service_class));
+    client.insert(client_class, QStringLiteral("generated class '%1'").arg(client_class));
     const auto add = [&](QHash<QString, QString>* names, const QString& name,
                          const QString& origin, const SourceLocation& loc) {
       const auto existing = names->constFind(name);
@@ -666,7 +788,9 @@ class SemanticAnalyzer {
         state[current] = 1;
         stack.append(current);
         QVector<int> dependencies;
-        for (const FieldDecl& field : file.pods.at(current).fields) {
+        // file.pods is still in AST order here; dependency discovery uses the
+        // raw AST types because PodModel fields are already resolved C++.
+        for (const FieldDecl& field : declarations.at(current).fields) {
           CollectPodDependencies(field.type, index, &dependencies);
         }
         for (const int dependency : dependencies) {
@@ -703,34 +827,10 @@ class SemanticAnalyzer {
     }
   }
 
-  [[nodiscard]] QVector<QVector<int>> ImportClosures() const {
-    QVector<QVector<int>> closures(model_.files.size());
-    for (int start = 0; start < model_.files.size(); ++start) {
-      QSet<int> seen;
-      seen.insert(start);
-      std::function<void(int)> visit = [&](int node) {
-        for (const int dependency : direct_imports_.at(node)) {
-          if (seen.contains(dependency)) continue;
-          seen.insert(dependency);
-          visit(dependency);
-        }
-      };
-      visit(start);
-      QVector<int> dependencies;
-      for (const int dependency : seen) {
-        if (dependency != start) dependencies.append(dependency);
-      }
-      std::sort(dependencies.begin(), dependencies.end());
-      closures[start] = dependencies;
-    }
-    return closures;
-  }
-
   void ComputeSchemas() {
-    const QVector<QVector<int>> closures = ImportClosures();
     for (int index = 0; index < model_.files.size(); ++index) {
       QVector<FileModel> imported;
-      for (const int dependency : closures.at(index)) {
+      for (const int dependency : closures_.at(index)) {
         imported.append(model_.files.at(dependency));
       }
       const quint64 hash = ComputeSchema(model_.files.at(index), imported);
@@ -744,13 +844,17 @@ class SemanticAnalyzer {
   Diagnostics& diagnostics_;
   const int diagnostic_base_;
   Model model_;
-  QHash<QString, EnumModel> enums_;
-  QHash<QString, EnumModel> enum_aliases_;
-  QHash<QString, PodModel> pods_;
   QHash<QString, DeclRecord> declared_names_;
   QHash<QString, DeclRecord> emitted_names_;
-  QHash<QString, QVector<int>> files_by_stem_;
+  // Every globally known generated type spelling (POD/ENUM/class ENUM canonical
+  // names and Class::Enum aliases) with its declaration location. A reference
+  // to one of these from outside its import closure is an error.
+  QHash<QString, DeclRecord> type_records_;
+  QHash<QString, int> index_by_path_;
+  QVector<FileSymbols> file_symbols_;
+  QVector<FileSymbols> visible_symbols_;
   QVector<QVector<int>> direct_imports_;
+  QVector<QVector<int>> closures_;
 };
 
 }  // namespace

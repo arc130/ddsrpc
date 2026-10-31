@@ -20,9 +20,17 @@ struct EnumModel {
   QVector<EnumValue> values;
 };
 
+// Each POD field carries the fully resolved by-value C++ type that emitters
+// print directly. Generated types are namespace-qualified and class enums use
+// their canonical <Class>_<Enum> spelling; external C++ spellings are kept.
+struct PodFieldModel {
+  QString name;
+  QString cpp_type;
+};
+
 struct PodModel {
   QString name;
-  QVector<FieldDecl> fields;
+  QVector<PodFieldModel> fields;
 };
 
 struct PropertyModel {
@@ -63,9 +71,9 @@ struct FileModel {
   QString path;
   QString stem;
   QVector<Directive> directives;
-  // IMPORT arguments in declaration order, exactly as written in the IDL.
-  // The schema hash normalizes them to file stems; generated includes derive
-  // their stem from each entry.
+  // Canonical paths of the directly imported files, in IMPORT declaration
+  // order. The schema hash derives file stems from these paths; generated
+  // includes derive their stem the same way.
   QVector<QString> imports;
   // PODs in dependency order; ENUMs and classes in source order.
   QVector<PodModel> pods;

@@ -95,10 +95,14 @@ TEST(SemanticTest, RejectsDuplicateNamesAndReservedMembers) {
 }
 
 TEST(SemanticTest, SchemaChangesWhenInterfaceChanges) {
-  QTemporaryDir tmp;
-  ASSERT_TRUE(tmp.isValid());
-  const QString first = tmp.filePath("first.idl");
-  const QString second = tmp.filePath("second.idl");
+  // Both inputs use the same stem so that only the interface change can
+  // explain a hash difference.
+  QTemporaryDir first_dir;
+  QTemporaryDir second_dir;
+  ASSERT_TRUE(first_dir.isValid());
+  ASSERT_TRUE(second_dir.isValid());
+  const QString first = first_dir.filePath("x.idl");
+  const QString second = second_dir.filePath("x.idl");
   Write(first, "class C { SLOT(int ping()) }\n");
   Write(second, "class C { SLOT(int ping(int x)) }\n");
 
@@ -110,6 +114,7 @@ TEST(SemanticTest, SchemaChangesWhenInterfaceChanges) {
   const auto m2 = Analyze(loaded_second, QStringLiteral("demo"), d2);
   ASSERT_TRUE(m1.has_value());
   ASSERT_TRUE(m2.has_value());
+  EXPECT_EQ(m1->files[0].stem, m2->files[0].stem);
   EXPECT_NE(m1->files[0].schema_hash, m2->files[0].schema_hash);
 }
 
@@ -235,7 +240,7 @@ TEST(SemanticTest, SchemaIsDeterministicAndTracksImportedTypes) {
   EXPECT_EQ(root1.stem, QStringLiteral("root"));
   EXPECT_EQ(root1.path, QFileInfo(first_dir.filePath("root.idl")).canonicalFilePath());
   ASSERT_EQ(root1.imports.size(), 1);
-  EXPECT_EQ(root1.imports[0], QStringLiteral("common.idl"));
+  EXPECT_EQ(root1.imports[0], QFileInfo(first_dir.filePath("common.idl")).canonicalFilePath());
   EXPECT_EQ(root1.schema_hash, m2->files[1].schema_hash);
   EXPECT_NE(root1.schema_hash, quint64(0));
   EXPECT_EQ(root1.classes[0].schema_hash, root1.schema_hash);
@@ -254,30 +259,33 @@ TEST(SemanticTest, SchemaIsDeterministicAndTracksImportedTypes) {
 }
 
 TEST(SemanticTest, SchemaIgnoresImportPathSpelling) {
-  QTemporaryDir relative_dir;
-  QTemporaryDir absolute_dir;
-  ASSERT_TRUE(relative_dir.isValid());
-  ASSERT_TRUE(absolute_dir.isValid());
-  const QByteArray common = "POD Point(int x)\n";
-  Write(relative_dir.filePath("common.idl"), common);
-  Write(absolute_dir.filePath("common.idl"), common);
-  Write(relative_dir.filePath("root.idl"),
+  QTemporaryDir tmp;
+  ASSERT_TRUE(tmp.isValid());
+  const QString common = tmp.filePath("common.idl");
+  const QString root = tmp.filePath("root.idl");
+  Write(common, "POD Point(int x)\n");
+  Write(root,
         "IMPORT \"common.idl\";\n"
         "class C { SLOT(void ping(Point p)) }\n");
-  Write(absolute_dir.filePath("root.idl"),
-        QStringLiteral("IMPORT \"%1\";\nclass C { SLOT(void ping(Point p)) }\n")
-            .arg(absolute_dir.filePath("common.idl"))
-            .toUtf8());
 
-  const auto relative_loaded = Load(relative_dir.filePath("root.idl"));
-  const auto absolute_loaded = Load(absolute_dir.filePath("root.idl"));
+  const auto relative_loaded = Load(root);
   Diagnostics d1;
-  Diagnostics d2;
   const auto relative_model = Analyze(relative_loaded, QStringLiteral("demo"), d1);
-  const auto absolute_model = Analyze(absolute_loaded, QStringLiteral("demo"), d2);
   ASSERT_TRUE(relative_model.has_value()) << d1.Format().toStdString();
+  ASSERT_EQ(relative_model->files[1].imports.size(), 1);
+  EXPECT_EQ(relative_model->files[1].imports[0], QFileInfo(common).canonicalFilePath());
+
+  // Same root path and stem, only the IMPORT spelling changes.
+  Write(root,
+        QStringLiteral("IMPORT \"%1\";\nclass C { SLOT(void ping(Point p)) }\n")
+            .arg(common)
+            .toUtf8());
+  const auto absolute_loaded = Load(root);
+  Diagnostics d2;
+  const auto absolute_model = Analyze(absolute_loaded, QStringLiteral("demo"), d2);
   ASSERT_TRUE(absolute_model.has_value()) << d2.Format().toStdString();
-  EXPECT_NE(relative_model->files[1].imports[0], absolute_model->files[1].imports[0]);
+  ASSERT_EQ(absolute_model->files[1].imports.size(), 1);
+  EXPECT_EQ(absolute_model->files[1].imports[0], QFileInfo(common).canonicalFilePath());
   EXPECT_EQ(relative_model->files[1].schema_hash, absolute_model->files[1].schema_hash);
 }
 
@@ -550,4 +558,206 @@ TEST(SemanticTest, PreservesBareEnumFromOtherClassAsExternalType) {
   ASSERT_EQ(cls.slots.size(), 1);
   EXPECT_EQ(cls.slots[0].return_cpp_type, QStringLiteral("demo::A_Mode"));
   EXPECT_EQ(cls.slots[0].params[0].cpp_type, QStringLiteral("Mode"));
+}
+
+TEST(SemanticTest, RejectsGeneratedClassNameMemberCollisions) {
+  QTemporaryDir tmp;
+  ASSERT_TRUE(tmp.isValid());
+  {
+    const auto result =
+        AnalyzeText(tmp.path(), "property_service.idl", "class C { PROP(int CService) }\n");
+    EXPECT_FALSE(result.model.has_value());
+    EXPECT_NE(result.diagnostics.indexOf(QStringLiteral("CService")), -1);
+  }
+  {
+    const auto result =
+        AnalyzeText(tmp.path(), "slot_client.idl", "class C { SLOT(void CClient()) }\n");
+    EXPECT_FALSE(result.model.has_value());
+    EXPECT_NE(result.diagnostics.indexOf(QStringLiteral("CClient")), -1);
+  }
+  {
+    const auto result =
+        AnalyzeText(tmp.path(), "enum_service.idl", "class C { ENUM CService { A } }\n");
+    EXPECT_FALSE(result.model.has_value());
+    EXPECT_NE(result.diagnostics.indexOf(QStringLiteral("CService")), -1);
+  }
+  {
+    const auto result =
+        AnalyzeText(tmp.path(), "property_client.idl", "class C { PROP(int CClient) }\n");
+    EXPECT_FALSE(result.model.has_value());
+    EXPECT_NE(result.diagnostics.indexOf(QStringLiteral("CClient")), -1);
+  }
+}
+
+TEST(SemanticTest, RejectsPodFieldWithPodName) {
+  QTemporaryDir tmp;
+  ASSERT_TRUE(tmp.isValid());
+  const auto result =
+      AnalyzeText(tmp.path(), "pod_name.idl", "POD Point(int Point)\nclass C { }\n");
+  EXPECT_FALSE(result.model.has_value());
+  EXPECT_NE(result.diagnostics.indexOf(QStringLiteral("same name")), -1);
+}
+
+TEST(SemanticTest, ResolvesPodFieldTypesAgainstVisibleSymbols) {
+  QTemporaryDir tmp;
+  ASSERT_TRUE(tmp.isValid());
+  Write(tmp.filePath("common.idl"),
+        "ENUM Mode { Idle }\n"
+        "POD Header(int version)\n"
+        "class Box { ENUM State { New } }\n");
+  Write(tmp.filePath("root.idl"),
+        "IMPORT \"common.idl\";\n"
+        "POD Thing(Header header, Mode mode, Box::State state, Box_State canonical_state, "
+        "const QString& label, QList<Header> items, unsigned long long bits)\n"
+        "class C { }\n");
+  const auto loaded = Load(tmp.filePath("root.idl"));
+  Diagnostics diagnostics;
+  const auto model = Analyze(loaded, QStringLiteral("demo"), diagnostics);
+  ASSERT_TRUE(model.has_value()) << diagnostics.Format().toStdString();
+  ASSERT_EQ(model->files.size(), 2);
+  const FileModel& root = model->files[1];
+  ASSERT_EQ(root.pods.size(), 1);
+  const PodModel& thing = root.pods[0];
+  EXPECT_EQ(thing.name, QStringLiteral("Thing"));
+  ASSERT_EQ(thing.fields.size(), 7);
+  EXPECT_EQ(thing.fields[0].name, QStringLiteral("header"));
+  EXPECT_EQ(thing.fields[0].cpp_type, QStringLiteral("demo::Header"));
+  EXPECT_EQ(thing.fields[1].cpp_type, QStringLiteral("demo::Mode"));
+  EXPECT_EQ(thing.fields[2].cpp_type, QStringLiteral("demo::Box_State"));
+  EXPECT_EQ(thing.fields[3].cpp_type, QStringLiteral("demo::Box_State"));
+  EXPECT_EQ(thing.fields[4].cpp_type, QStringLiteral("QString"));
+  EXPECT_EQ(thing.fields[5].cpp_type, QStringLiteral("QList<demo::Header>"));
+  EXPECT_EQ(thing.fields[6].cpp_type, QStringLiteral("unsigned long long"));
+}
+
+TEST(SemanticTest, ResolvesTypesFromTransitiveImports) {
+  QTemporaryDir tmp;
+  ASSERT_TRUE(tmp.isValid());
+  Write(tmp.filePath("base.idl"),
+        "ENUM Mode { Idle }\n"
+        "POD Base(int version)\n"
+        "class Box { ENUM State { New } }\n");
+  Write(tmp.filePath("mid.idl"),
+        "IMPORT \"base.idl\";\n"
+        "POD Mid(Base base, Mode mode)\n");
+  Write(tmp.filePath("root.idl"),
+        "IMPORT \"mid.idl\";\n"
+        "class C { SLOT(void use(Mid mid, Box::State state, Base base, Mode mode)) }\n");
+  const auto loaded = Load(tmp.filePath("root.idl"));
+  Diagnostics diagnostics;
+  const auto model = Analyze(loaded, QStringLiteral("demo"), diagnostics);
+  ASSERT_TRUE(model.has_value()) << diagnostics.Format().toStdString();
+  ASSERT_EQ(model->files.size(), 3);
+  const FileModel& mid = model->files[1];
+  ASSERT_EQ(mid.pods.size(), 1);
+  ASSERT_EQ(mid.pods[0].fields.size(), 2);
+  EXPECT_EQ(mid.pods[0].fields[0].cpp_type, QStringLiteral("demo::Base"));
+  EXPECT_EQ(mid.pods[0].fields[1].cpp_type, QStringLiteral("demo::Mode"));
+  const auto& slot = model->files[2].classes[0].slots[0];
+  ASSERT_EQ(slot.params.size(), 4);
+  EXPECT_EQ(slot.params[0].cpp_type, QStringLiteral("demo::Mid"));
+  EXPECT_EQ(slot.params[1].cpp_type, QStringLiteral("demo::Box_State"));
+  EXPECT_EQ(slot.params[2].cpp_type, QStringLiteral("demo::Base"));
+  EXPECT_EQ(slot.params[3].cpp_type, QStringLiteral("demo::Mode"));
+}
+
+TEST(SemanticTest, RejectsInvisibleCrossFileReferences) {
+  QTemporaryDir first;
+  ASSERT_TRUE(first.isValid());
+  {
+    Write(first.filePath("a.idl"), "POD A(B b)\n");
+    Write(first.filePath("b.idl"), "POD B(int x)\n");
+    Write(first.filePath("root.idl"),
+          "IMPORT \"a.idl\";\n"
+          "IMPORT \"b.idl\";\n"
+          "class C { }\n");
+    const auto loaded = Load(first.filePath("root.idl"));
+    Diagnostics diagnostics;
+    EXPECT_FALSE(Analyze(loaded, QStringLiteral("demo"), diagnostics).has_value());
+    const QString text = diagnostics.Format();
+    EXPECT_NE(text.indexOf(QStringLiteral("'B'")), -1) << text.toStdString();
+    EXPECT_NE(text.indexOf(QStringLiteral("not visible")), -1) << text.toStdString();
+  }
+
+  QTemporaryDir second;
+  ASSERT_TRUE(second.isValid());
+  {
+    Write(second.filePath("a.idl"), "POD A(int x)\n");
+    Write(second.filePath("b.idl"), "POD B(A a)\n");
+    Write(second.filePath("root.idl"),
+          "IMPORT \"a.idl\";\n"
+          "IMPORT \"b.idl\";\n"
+          "class C { }\n");
+    const auto loaded = Load(second.filePath("root.idl"));
+    Diagnostics diagnostics;
+    EXPECT_FALSE(Analyze(loaded, QStringLiteral("demo"), diagnostics).has_value());
+    const QString text = diagnostics.Format();
+    EXPECT_NE(text.indexOf(QStringLiteral("'A'")), -1) << text.toStdString();
+    EXPECT_NE(text.indexOf(QStringLiteral("not visible")), -1) << text.toStdString();
+  }
+}
+
+TEST(SemanticTest, RejectsCrossFilePodCycles) {
+  QTemporaryDir tmp;
+  ASSERT_TRUE(tmp.isValid());
+  Write(tmp.filePath("a.idl"), "POD A(B b)\n");
+  Write(tmp.filePath("b.idl"), "POD B(A a)\n");
+  Write(tmp.filePath("root.idl"),
+        "IMPORT \"a.idl\";\n"
+        "IMPORT \"b.idl\";\n"
+        "class C { }\n");
+  const auto loaded = Load(tmp.filePath("root.idl"));
+  Diagnostics diagnostics;
+  EXPECT_FALSE(Analyze(loaded, QStringLiteral("demo"), diagnostics).has_value());
+  const QString text = diagnostics.Format();
+  EXPECT_NE(text.indexOf(QStringLiteral("'A'")), -1) << text.toStdString();
+  EXPECT_NE(text.indexOf(QStringLiteral("'B'")), -1) << text.toStdString();
+  EXPECT_NE(text.indexOf(QStringLiteral("not visible")), -1) << text.toStdString();
+}
+
+TEST(SemanticTest, RejectsDuplicateOutputStems) {
+  QTemporaryDir tmp;
+  ASSERT_TRUE(tmp.isValid());
+  Write(tmp.filePath("one/x.idl"), "POD One(int x)\n");
+  Write(tmp.filePath("two/x.idl"), "POD Two(int y)\n");
+  Write(tmp.filePath("root.idl"),
+        "IMPORT \"one/x.idl\";\n"
+        "IMPORT \"two/x.idl\";\n"
+        "class C { }\n");
+  const auto loaded = Load(tmp.filePath("root.idl"));
+  Diagnostics diagnostics;
+  EXPECT_FALSE(Analyze(loaded, QStringLiteral("demo"), diagnostics).has_value());
+  const QString text = diagnostics.Format();
+  EXPECT_NE(text.indexOf(QStringLiteral("duplicate output stem")), -1) << text.toStdString();
+  EXPECT_NE(text.indexOf(QStringLiteral("'x'")), -1) << text.toStdString();
+}
+
+TEST(SemanticTest, RejectsQtMacroNames) {
+  QTemporaryDir tmp;
+  ASSERT_TRUE(tmp.isValid());
+  const QStringList names = {
+      QStringLiteral("signals"), QStringLiteral("slots"),  QStringLiteral("emit"),
+      QStringLiteral("Q_SIGNALS"), QStringLiteral("Q_SLOTS"), QStringLiteral("Q_EMIT"),
+      QStringLiteral("Q_OBJECT"),  QStringLiteral("Q_PROPERTY"),
+  };
+  for (int index = 0; index < names.size(); ++index) {
+    const QString& name = names.at(index);
+    const auto result =
+        AnalyzeText(tmp.path(), QStringLiteral("qt_member_%1.idl").arg(index),
+                    QStringLiteral("class C { PROP(int %1) }\n").arg(name).toUtf8());
+    EXPECT_FALSE(result.model.has_value()) << name.toStdString();
+    EXPECT_NE(result.diagnostics.indexOf(name), -1) << name.toStdString();
+  }
+  {
+    const auto result =
+        AnalyzeText(tmp.path(), "qt_pod_field.idl", "POD P(int emit)\nclass C { }\n");
+    EXPECT_FALSE(result.model.has_value());
+    EXPECT_NE(result.diagnostics.indexOf(QStringLiteral("emit")), -1);
+  }
+  {
+    const auto result = AnalyzeText(
+        tmp.path(), "qt_param.idl", "class C { SLOT(void run(int signals)) }\n");
+    EXPECT_FALSE(result.model.has_value());
+    EXPECT_NE(result.diagnostics.indexOf(QStringLiteral("signals")), -1);
+  }
 }

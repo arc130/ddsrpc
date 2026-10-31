@@ -38,6 +38,11 @@ TEST(ImportResolverTest, ResolvesRelativeAndIncludeDirImports) {
   EXPECT_EQ(program->files[0].ast.pods[0].name, QStringLiteral("Point"));
   EXPECT_EQ(program->files[1].ast.pods[0].name, QStringLiteral("Size"));
   EXPECT_EQ(program->files[2].ast.classes.size(), 1);
+  EXPECT_TRUE(program->files[0].resolved_imports.isEmpty());
+  EXPECT_TRUE(program->files[1].resolved_imports.isEmpty());
+  ASSERT_EQ(program->files[2].resolved_imports.size(), 2);
+  EXPECT_EQ(program->files[2].resolved_imports[0], QFileInfo(common).canonicalFilePath());
+  EXPECT_EQ(program->files[2].resolved_imports[1], QFileInfo(extra).canonicalFilePath());
 }
 
 TEST(ImportResolverTest, RejectsLexerOnlyDiagnostics) {
@@ -180,6 +185,33 @@ TEST(ImportResolverTest, LoadsEachCanonicalFileOnce) {
   for (const auto& file : program->files) paths.insert(file.canonical_path);
   EXPECT_EQ(paths.size(), 4);
   EXPECT_EQ(program->files[0].canonical_path, QFileInfo(common).canonicalFilePath());
+
+  const QString common_path = QFileInfo(common).canonicalFilePath();
+  EXPECT_EQ(program->files[1].resolved_imports, QVector<QString>{common_path});
+  EXPECT_EQ(program->files[2].resolved_imports, QVector<QString>{common_path});
+  EXPECT_EQ(program->files[3].resolved_imports,
+            (QVector<QString>{QFileInfo(a).canonicalFilePath(),
+                              QFileInfo(b).canonicalFilePath()}));
+}
+
+TEST(ImportResolverTest, DeduplicatesRepeatedImportsInResolvedImports) {
+  QTemporaryDir tmp;
+  ASSERT_TRUE(tmp.isValid());
+  const QString common = tmp.filePath("common.idl");
+  const QString root = tmp.filePath("root.idl");
+  WriteFile(common, "POD Common(int x)\n");
+  WriteFile(root,
+            "IMPORT \"common.idl\";\n"
+            "IMPORT \"./common.idl\";\n"
+            "POD Root(Common common)\n");
+
+  Diagnostics diagnostics;
+  ImportResolver resolver({}, diagnostics);
+  const auto program = resolver.Load(root);
+  ASSERT_TRUE(program.has_value()) << diagnostics.Format().toStdString();
+  ASSERT_EQ(program->files.size(), 2);
+  EXPECT_EQ(program->files[1].resolved_imports,
+            QVector<QString>{QFileInfo(common).canonicalFilePath()});
 }
 
 TEST(ImportResolverTest, FailsNestedImportWithoutPartialProgram) {

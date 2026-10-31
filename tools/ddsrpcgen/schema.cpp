@@ -3,7 +3,6 @@
 #include <QCryptographicHash>
 #include <QFileInfo>
 #include <QSet>
-#include <QStringList>
 
 #include <algorithm>
 
@@ -35,90 +34,6 @@ void AppendFlag(QByteArray* out, const char* tag, bool value) {
   AppendField(out, tag, static_cast<qint64>(value ? 1 : 0));
 }
 
-[[nodiscard]] QString NormalizeBuiltinSpelling(const QString& spelling) {
-  QStringList words;
-  QString current;
-  for (const QChar c : spelling) {
-    if (c.isSpace() || c == QLatin1Char('&')) {
-      if (!current.isEmpty()) {
-        words.append(current);
-        current.clear();
-      }
-    } else {
-      current.append(c);
-    }
-  }
-  if (!current.isEmpty()) words.append(current);
-  words.removeAll(QStringLiteral("const"));
-  return words.join(QLatin1Char(' '));
-}
-
-[[nodiscard]] bool IsBuiltinCore(const QString& spelling) {
-  static const QSet<QString> kWords = {
-      QStringLiteral("signed"),   QStringLiteral("unsigned"), QStringLiteral("short"),
-      QStringLiteral("long"),     QStringLiteral("int"),      QStringLiteral("char"),
-      QStringLiteral("bool"),     QStringLiteral("float"),    QStringLiteral("double"),
-      QStringLiteral("void"),     QStringLiteral("wchar_t"),  QStringLiteral("char16_t"),
-      QStringLiteral("char32_t"),
-  };
-  if (spelling.isEmpty()) return false;
-  const QStringList words = spelling.split(QLatin1Char(' '), QString::SkipEmptyParts);
-  if (words.isEmpty()) return false;
-  for (const QString& word : words) {
-    if (!kWords.contains(word)) return false;
-  }
-  return true;
-}
-
-[[nodiscard]] QString Qualify(const QString& name, const QString& name_space) {
-  if (name_space.isEmpty()) return name;
-  return name_space + QStringLiteral("::") + name;
-}
-
-struct TypeSymbols {
-  QHash<QString, QString> names;    // IDL spelling -> unqualified generated name
-  QHash<QString, QString> aliases;  // "Class::Enum" -> "Class_Enum"
-};
-
-void CollectSymbols(const FileModel& file, TypeSymbols* symbols) {
-  for (const PodModel& pod : file.pods) symbols->names.insert(pod.name, pod.name);
-  for (const EnumModel& e : file.enums) symbols->names.insert(e.idl_name, e.cpp_name);
-  for (const ClassModel& cls : file.classes) {
-    for (const EnumModel& e : cls.class_enums) {
-      symbols->names.insert(e.cpp_name, e.cpp_name);
-      if (!e.class_owner.isEmpty()) {
-        symbols->aliases.insert(e.class_owner + QStringLiteral("::") + e.idl_name, e.cpp_name);
-      }
-    }
-  }
-}
-
-[[nodiscard]] QString CanonicalType(const TypeRef& type, const TypeSymbols& symbols,
-                                    const QString& name_space) {
-  const QString builtin = NormalizeBuiltinSpelling(type.spelling);
-  QString base;
-  if (type.args.isEmpty() && IsBuiltinCore(builtin)) {
-    base = builtin;
-  } else {
-    const auto alias = symbols.aliases.constFind(type.base);
-    if (alias != symbols.aliases.constEnd()) {
-      base = Qualify(alias.value(), name_space);
-    } else {
-      const auto name = symbols.names.constFind(type.base);
-      base = name != symbols.names.constEnd() ? Qualify(name.value(), name_space)
-                                              : type.base;
-    }
-  }
-  if (!type.args.isEmpty()) {
-    QStringList args;
-    for (const TypeRef& arg : type.args) {
-      args.append(CanonicalType(arg, symbols, name_space));
-    }
-    base += QLatin1Char('<') + args.join(QStringLiteral(", ")) + QLatin1Char('>');
-  }
-  return base;
-}
-
 void AppendEnum(QByteArray* out, const EnumModel& e, const char* tag) {
   AppendField(out, tag, e.idl_name);
   AppendField(out, "enum_cpp", e.cpp_name);
@@ -130,13 +45,12 @@ void AppendEnum(QByteArray* out, const EnumModel& e, const char* tag) {
   }
 }
 
-void AppendPod(QByteArray* out, const PodModel& pod, const TypeSymbols& symbols,
-               const QString& name_space, const char* tag) {
+void AppendPod(QByteArray* out, const PodModel& pod, const char* tag) {
   AppendField(out, tag, pod.name);
   AppendField(out, "pod_field_count", pod.fields.size());
-  for (const FieldDecl& field : pod.fields) {
+  for (const PodFieldModel& field : pod.fields) {
     AppendField(out, "pod_field", field.name);
-    AppendField(out, "pod_field_type", CanonicalType(field.type, symbols, name_space));
+    AppendField(out, "pod_field_type", field.cpp_type);
   }
 }
 
@@ -199,28 +113,16 @@ quint64 ComputeSchema(const FileModel& file, const QVector<FileModel>& imported_
     AppendField(&feed, "directive", directive.text);
   }
 
-  // Import relations participate by stem only. The declaration spelling (for
-  // example an absolute IMPORT path) must never leak into the schema, because
-  // it differs between otherwise identical checkouts.
+  // Import relations participate by stem only. FileModel.imports already holds
+  // resolved canonical paths, but absolute checkout paths must never leak into
+  // the schema, because they differ between otherwise identical checkouts.
   AppendField(&feed, "import_count", file.imports.size());
   for (const QString& import : file.imports) {
     AppendField(&feed, "import", QFileInfo(import).completeBaseName());
   }
 
-  TypeSymbols symbols;
-  QSet<QString> seen_paths;
-  if (!file.path.isEmpty()) seen_paths.insert(file.path);
-  CollectSymbols(file, &symbols);
-  for (const FileModel& imported : imported_files) {
-    if (!imported.path.isEmpty()) {
-      if (seen_paths.contains(imported.path)) continue;
-      seen_paths.insert(imported.path);
-    }
-    CollectSymbols(imported, &symbols);
-  }
-
   AppendField(&feed, "pod_count", file.pods.size());
-  for (const PodModel& pod : file.pods) AppendPod(&feed, pod, symbols, file.name_space, "pod");
+  for (const PodModel& pod : file.pods) AppendPod(&feed, pod, "pod");
 
   AppendField(&feed, "enum_count", file.enums.size());
   for (const EnumModel& e : file.enums) AppendEnum(&feed, e, "enum");
@@ -270,7 +172,7 @@ quint64 ComputeSchema(const FileModel& file, const QVector<FileModel>& imported_
     if (type.kind == 0) {
       AppendEnum(&feed, type.enum_model, "imported_enum");
     } else {
-      AppendPod(&feed, type.pod_model, symbols, file.name_space, "imported_pod");
+      AppendPod(&feed, type.pod_model, "imported_pod");
     }
   }
 
