@@ -502,6 +502,16 @@ signals:
 - 客户端方法应在协程中调用；可在多个协程中并发发起不同请求。
 - 请求重试可能造成服务端重复执行；语义与 Transport 一致，业务需幂等。
 
+### 8.6 客户端上行消息
+
+- 客户端没有独立的 `Publish` API，也不是 DDS 事件 topic 的 publisher；客户端向服务端发送消息只能通过 `SLOT` 请求-响应：
+  - IDL 中声明 `SLOT(void report(...))`；
+  - 客户端调用对应的协程方法；
+  - 服务端在纯虚处理函数中接收并处理。
+- 该路径返回服务端的处理结果/错误，不是 fire-and-forget；Transport 重试可能使处理函数被执行多次，业务需幂等。
+- 如果上行处理需要再通知订阅者，由服务端处理函数调用生成的 `publish<Signal>()`。
+- 第一版不提供客户端→服务端的单向调用，也不允许客户端发布 SIGNAL/PROP 事件。
+
 ## 9. PROP 映射表
 
 | 修饰符 | 服务端 setter | 客户端写方法 | 客户端可观察 |
@@ -617,6 +627,7 @@ ddsrpc_add_idl(<target>
 
 - 先启动 client、后启动 service：`start()` 立即成功、`ready()` 初始为 false；service 上线后后台握手使 `ready()` 变 true；
 - SLOT 返回值/void、多个并发调用（不同 Coro task 处理，允许乱序回复）；
+- 客户端通过上行 SLOT 上报，服务端处理后发布 SIGNAL，其他订阅客户端收到；
 - handler 返回 `RpcErrc` 与抛异常两条错误路径；
 - SIGNAL 发布/订阅；
 - 属性初始快照、变更推送、READWRITE/READPUSH 远端写入；
@@ -650,6 +661,7 @@ ddsrpc_add_idl(<target>
 - 无请求去重，自动重试可能重复执行 SLOT。
 - 服务端无并发上限，慢处理器/请求洪水可能导致协程过多。
 - READPUSH/READWRITE 都等待服务端确认，和 QtRO 的异步 push 语义不完全相同。
+- 客户端不能直接发布 SIGNAL/PROP，也没有上行单向调用；客户端→服务端只走 SLOT 请求-响应。
 - 服务重启后的客户端自动恢复不在本版。
 - qmake 只是消费示例，不是完整构建体系。
 - 仅验证 FakeDdsProvider；真实 Fast DDS 路径待后续验证。
