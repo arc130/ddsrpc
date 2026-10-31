@@ -432,10 +432,6 @@ public:
                               transport::DdsTransport& transport,
                               Options options = {},
                               QObject* parent = nullptr);
-    explicit CalculatorClient(transport::DdsNode& node,
-                              ddsrpc::LinkStateSource& link_state,
-                              Options options = {},
-                              QObject* parent = nullptr);
     ~CalculatorClient() override;
 
     Coro::Result<void> prepare();
@@ -484,27 +480,9 @@ signals:
 
 ### 8.3 链路监控、自动重连与属性刷新
 
-> **接口约束与可替换点**：`transport::DdsNode` 0.6.0 没有公开连接状态接口；当前可用的事实源是 `transport::DdsTransport::CurrentLinkState()`。为了避免生成代码直接绑死该 API，runtime 提供：
->
-> ```cpp
-> namespace ddsrpc {
-> enum class LinkState { kDown, kEstablishing, kUp };
-> class LinkStateSource {
-> public:
->     virtual ~LinkStateSource() = default;
->     virtual LinkState currentLinkState() const = 0;
-> };
-> class DdsTransportLinkStateSource final : public LinkStateSource {
-> public:
->     explicit DdsTransportLinkStateSource(transport::DdsTransport&);
->     LinkState currentLinkState() const override;
-> };
-> }
-> ```
->
-> 生成 Client 的 `DdsTransport&` 构造重载内部持有 `DdsTransportLinkStateSource`；另一个构造重载接受任意 `LinkStateSource&`，便于后续接入新 SDK/新 API 时只替换 adapter。传入的 transport/source 必须寿命长于 Client；使用 transport 重载时，transport 必须是构造 node 所用的那一个。
+> **接口约束**：`transport::DdsNode` 0.6.0 没有公开连接状态接口；链路状态来自它借用的 `transport::DdsTransport::CurrentLinkState()`。生成 Client 的 `DdsTransport&` 构造参数必须就是构造 node 所用的那一个，且寿命长于 Client。这里**不做 LinkStateSource 之类的抽象层**；生成的 `client.cpp` 直接调用 `transport_.CurrentLinkState()`，后续 SDK/API 变化时直接修改生成代码。transport 必须比 client 活得久。
 
-- 生成的 Client 启动一个链路监控协程，按 `Options::link_poll_interval`（默认 100 ms）轮询 `LinkStateSource::currentLinkState()`。
+- 生成的 Client 启动一个链路监控协程（生成在 `client.cpp` 中），按 `Options::link_poll_interval`（默认 100 ms）轮询 `transport_.CurrentLinkState()`。
 - 状态机：
   1. **未 Up**（`kDown`/`kEstablishing`）：若此前 `ready==true`，置 `ready=false` 并发 `readyChanged(false)`；不刷新属性，等待链路。
   2. **首次 Up**：发起首次应用层握手（内部 op 0，携带 schema hash 和属性快照请求）。成功后置 `ready=true`，发 `readyChanged(true)`。
@@ -560,7 +538,7 @@ signals:
 
 ## 10. 生命周期与线程契约
 
-- 宿主拥有并启停 `DdsTransport`；`DdsNode` 借用 transport；生成的 Service 借用 node，生成的 Client 借用 node 和链路状态源（当前默认 adapter 借用同一个 transport）。transport/source 必须比 client 活得久。
+- 宿主拥有并启停 `DdsTransport`；`DdsNode` 借用 transport；生成的 Service 借用 node，生成的 Client 借用 node 和同一个 transport（用于直接轮询链路状态）。transport 必须比 client 活得久。
 - 推荐顺序：
 
 ```text
@@ -668,7 +646,6 @@ ddsrpc_add_idl(<target>
 - 先 client 后 service 的自动握手；
 - 服务端停止再以相同 schema 重启：链路状态由 Up 变非 Up，客户端 `ready` 变 false；再次 Up 后自动重新订阅、刷新 PROP，缓存反映重启后的新值，`ready` 恢复 true；
 - 网络中断/恢复路径（用 FakeDdsProvider 停止/重建端点模拟）同样触发自动刷新；
-- 用可注入的 FakeLinkStateSource 确定性地驱动 Down → Up，验证自动刷新状态机（不依赖真实发现时序）；
 - 重连不自动重发在途 RPC（调用方收到错误/超时）；
 - import 后跨文件类型/接口可用。
 
@@ -699,7 +676,7 @@ ddsrpc_add_idl(<target>
 - READPUSH/READWRITE 都等待服务端确认，和 QtRO 的异步 push 语义不完全相同。
 - 客户端不能直接发布 SIGNAL/PROP，也没有上行单向调用；客户端→服务端只走 SLOT 请求-响应。
 - 重连后会自动刷新 PROP 并恢复 `ready`，但不自动重发/恢复在途 RPC；调用方需自行重试。
-- 不引入 UUID/会话跟踪；默认断线检测基于 `DdsTransport::CurrentLinkState()` adapter，该状态是已声明端点整体聚合，不是按服务区分。若链路状态未发生可观察的下降，自动刷新可能不会触发；同一 client node 挂多个服务时也可能由其他端点状态触发刷新。后续 SDK 可通过自定义 `LinkStateSource` 替换检测来源。
+- 不引入 UUID/会话跟踪；断线检测直接调用 `DdsTransport::CurrentLinkState()`，该状态是已声明端点整体聚合，不是按服务区分。若链路状态未发生可观察的下降，自动刷新可能不会触发；同一 client node 挂多个服务时也可能由其他端点状态触发刷新。后续 SDK 变化时直接修改生成代码中的状态查询。
 - qmake 只是消费示例，不是完整构建体系。
 - 仅验证 FakeDdsProvider；真实 Fast DDS 路径待后续验证。
 
