@@ -1,5 +1,8 @@
 add_library(ddsrpcgen_lib STATIC
+  cli.cpp
+  code_writer.cpp
   diagnostic.cpp
+  emit_types.cpp
   import_resolver.cpp
   lexer.cpp
   parser.cpp
@@ -13,3 +16,6 @@ target_compile_features(ddsrpcgen_lib PUBLIC cxx_std_17)
 # in its QObject headers unless QT_NO_KEYWORDS is set. The generator and its
 # consumers are Qt Core-only and do not use the keyword macros.
 target_compile_definitions(ddsrpcgen_lib PUBLIC QT_NO_KEYWORDS)
+
+add_executable(ddsrpcgen main.cpp)
+target_link_libraries(ddsrpcgen PRIVATE ddsrpcgen_lib)
