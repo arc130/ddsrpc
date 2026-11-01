@@ -93,7 +93,39 @@ FASTDDS_CLIENT_COUNT=7
 ```
 
 服务端输出 `FASTDDS_SERVER_READY domain=43`。该示例跨两个 OS 进程验证了 RPC、SIGNAL 发布订阅和 PROP 远端写入。
-Fast DDS 缺失时该示例不会构建，其余 FakeDdsProvider 测试不受影响。真实 Fast DDS 下的重连刷新尚未单独验证。
+Fast DDS 缺失时该示例不会构建，其余 FakeDdsProvider 测试不受影响。
+
+### Fast DDS 重连与属性自动刷新检查
+
+`examples/fastdds_reconnect` 跨进程验证服务端重启后的自动恢复：
+
+1. server1（`name=before count=1`）+ client 首次 ready，读取属性快照；
+2. 杀死 server1，client 观察到链路 Down，`ready=false`；
+3. server2（`name=after count=2`）启动，client 重新订阅事件、刷新属性、恢复 ready，
+   收到新 SIGNAL，并成功完成一次 RPC。
+
+构建后在 WSL 中运行（脚本自行启动/结束服务端进程，默认使用 `build-fastdds`）：
+
+```bash
+BUILD_DIR=build-fastdds bash examples/fastdds_reconnect/run_check.sh
+```
+
+预期输出：
+
+```text
+RECONNECT_CLIENT_READY_1 name=before count=1
+RECONNECT_CLIENT_DOWN
+RECONNECT_CLIENT_READY_2 name=after count=2
+RECONNECT_CLIENT_GREET=reconnect hello after announced=2
+CLIENT_RC=0
+---SERVER---
+RECONNECT_SERVER_READY name=before count=1
+RECONNECT_SERVER_READY name=after count=2
+```
+
+脚本约需 20–25 秒：Fast DDS 对硬杀对端要等 participant lease 到期才让链路状态变为非 Up。
+脚本会等到客户端确认 Down 后再启动新服务端；不等待可观察 Down 的极快速重启不在自动刷新保证内，
+见“限制”。
 
 ## IDL
 
@@ -214,7 +246,12 @@ transport.Close(); transport.WaitClosed()
 - 不自动重发重连前在途的 RPC；只自动刷新 `ready` 和 PROP 缓存。
 - 默认 DdsTransport 链路状态是端点整体聚合，不是按服务区分；同一 client node 挂多个服务时可能
   由其他端点状态触发刷新。
-- FakeDdsProvider 是默认验收路径；真实 Fast DDS 跨进程已做基础 RPC/SIGNAL/PROP 验证，重连场景仍待验证。
+- 自动刷新依赖链路状态出现可观察的非 Up。Fast DDS 硬杀对端后，匹配计数要等 participant lease
+  （默认 20 秒）才归零，检测可能因此变慢；若新服务端在链路状态下降前就完成重启，客户端可能
+  观察不到重连并保留旧 PROP 缓存。本版不额外做服务实例探测；`fastdds_reconnect` 检查会等待
+  可观察的 Down 后再启动新服务端。
+- FakeDdsProvider 是默认验收路径；真实 Fast DDS 跨进程已完成基础 RPC/SIGNAL/PROP 以及
+  可观察掉线后的重连/PROP 刷新/SIGNAL 重订阅/RPC 恢复验证。
 - 生成文件默认会被下一次生成覆盖；需要长期手改时修改生成器或停止重新生成。
 
 ## 测试
