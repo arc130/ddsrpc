@@ -29,6 +29,15 @@ namespace {
          slot.name + QLatin1Char('(') + Parameters(slot.params) + QLatin1Char(')');
 }
 
+[[nodiscard]] QString Capitalize(const QString& name) {
+  if (name.isEmpty()) return name;
+  return name.left(1).toUpper() + name.mid(1);
+}
+
+[[nodiscard]] QString PublishName(const SignalModel& signal) {
+  return QStringLiteral("publish") + Capitalize(signal.name);
+}
+
 [[nodiscard]] QString UniqueLocal(const QString& base, QSet<QString>* taken) {
   QString name = base;
   while (taken->contains(name)) name += QLatin1Char('_');
@@ -111,6 +120,11 @@ void EmitClassHeader(CodeWriter& writer, const ClassModel& cls,
     writer.Line(QStringLiteral("virtual ") + SlotSignature(slot) + QStringLiteral(" = 0;"));
   }
   if (!cls.slots.isEmpty()) writer.Line();
+  for (const SignalModel& signal : cls.signals) {
+    writer.Line(QStringLiteral("::Coro::Result<void> ") + PublishName(signal) +
+                QLatin1Char('(') + Parameters(signal.params) + QStringLiteral(");"));
+  }
+  if (!cls.signals.isEmpty()) writer.Line();
   writer.Dedent();
   writer.Line(QStringLiteral("protected:"));
   writer.Indent();
@@ -267,6 +281,40 @@ void EmitHandleOperation(CodeWriter& writer, const ClassModel& cls) {
   writer.Line(QStringLiteral("}"));
 }
 
+void EmitSignalPublish(CodeWriter& writer, const ClassModel& cls,
+                       const SignalModel& signal) {
+  QSet<QString> taken;
+  for (const ParamModel& param : signal.params) taken.insert(param.name);
+  const QString payload_name = UniqueLocal(QStringLiteral("payload"), &taken);
+  const QString out_name = UniqueLocal(QStringLiteral("out"), &taken);
+
+  writer.Line(QStringLiteral("::Coro::Result<void> ") + cls.idl_name +
+              QStringLiteral("Service::") + PublishName(signal) + QLatin1Char('(') +
+              Parameters(signal.params) + QStringLiteral(") {"));
+  writer.Indent();
+  writer.Line(QStringLiteral("::QByteArray ") + payload_name + QLatin1Char(';'));
+  if (!signal.params.isEmpty()) {
+    writer.Line(QStringLiteral("::QDataStream ") + out_name + QStringLiteral("(&") +
+                payload_name + QStringLiteral(", ::QIODevice::WriteOnly);"));
+    writer.Line(QStringLiteral("::ddsrpc::wire::Begin(") + out_name + QStringLiteral(");"));
+    for (const ParamModel& param : signal.params) {
+      writer.Line(out_name + QStringLiteral(" << ") + param.name + QLatin1Char(';'));
+    }
+    writer.Line(QStringLiteral("if (") + out_name +
+                QStringLiteral(".status() != ::QDataStream::Ok) {"));
+    writer.Indent();
+    writer.Line(
+        QStringLiteral("return ::ddsrpc::make_error_code(::ddsrpc::RpcErrc::kEncode);"));
+    writer.Dedent();
+    writer.Line(QStringLiteral("}"));
+  }
+  writer.Line(QStringLiteral("return this->PublishEvent(::ddsrpc::wire::EventKind::kSignal, ") +
+              QString::number(signal.event_id) +
+              QStringLiteral(", this->NextRevision(), ") + payload_name + QStringLiteral(");"));
+  writer.Dedent();
+  writer.Line(QStringLiteral("}"));
+}
+
 void EmitBuildPropertySnapshot(CodeWriter& writer, const ClassModel& cls) {
   writer.Line(QStringLiteral("::ddsrpc::OperationResult ") + cls.idl_name +
               QStringLiteral("Service::BuildPropertySnapshot() {"));
@@ -346,6 +394,10 @@ QString EmitServiceSource(const FileModel& file, const QString& name_space) {
     EmitConstructor(writer, file, cls);
     writer.Line();
     EmitHandleOperation(writer, cls);
+    for (const SignalModel& signal : cls.signals) {
+      writer.Line();
+      EmitSignalPublish(writer, cls, signal);
+    }
     writer.Line();
     EmitBuildPropertySnapshot(writer, cls);
     first = false;

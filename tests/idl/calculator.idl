@@ -1,0 +1,7 @@
+class Calculator {
+    SIGNAL(calculated(int result))
+
+    SLOT(int add(int a, int b))
+    SLOT(void reset())
+    SLOT(void report(QString text))
+};

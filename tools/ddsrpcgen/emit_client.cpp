@@ -328,7 +328,43 @@ void EmitPropertyAndEventHooks(CodeWriter& writer, const ClassModel& cls) {
   writer.Line(QStringLiteral("}"));
   writer.Line();
   writer.Line(QStringLiteral("void ") + name +
-              QStringLiteral("::DispatchSignal(::quint32, ::QDataStream&) {}"));
+              QStringLiteral("::DispatchSignal(::quint32 event_id, ::QDataStream& in) {"));
+  writer.Indent();
+  if (cls.signals.isEmpty()) {
+    writer.Line(QStringLiteral("(void)event_id;"));
+    writer.Line(QStringLiteral("(void)in;"));
+  } else {
+    writer.Line(QStringLiteral("switch (event_id) {"));
+    writer.Indent();
+    for (const SignalModel& signal : cls.signals) {
+      QStringList taken{QStringLiteral("event_id"), QStringLiteral("in")};
+      writer.Line(QStringLiteral("case ") + QString::number(signal.event_id) +
+                  QStringLiteral(": {"));
+      writer.Indent();
+      QStringList locals;
+      locals.reserve(signal.params.size());
+      for (const ParamModel& param : signal.params) {
+        const QString local = UniqueLocal(param.name, &taken);
+        locals.append(local);
+        writer.Line(QualifiedCppType(param.cpp_type) + QLatin1Char(' ') + local +
+                    QStringLiteral("{};"));
+        writer.Line(QStringLiteral("in >> ") + local + QLatin1Char(';'));
+      }
+      if (!signal.params.isEmpty()) {
+        writer.Line(QStringLiteral("if (in.status() != ::QDataStream::Ok) return;"));
+      }
+      writer.Line(QStringLiteral("Q_EMIT ") + signal.name + QLatin1Char('(') +
+                  locals.join(QStringLiteral(", ")) + QStringLiteral(");"));
+      writer.Line(QStringLiteral("return;"));
+      writer.Dedent();
+      writer.Line(QStringLiteral("}"));
+    }
+    writer.Line(QStringLiteral("default: return;"));
+    writer.Dedent();
+    writer.Line(QStringLiteral("}"));
+  }
+  writer.Dedent();
+  writer.Line(QStringLiteral("}"));
   writer.Line();
   writer.Line(QStringLiteral("void ") + name +
               QStringLiteral("::DispatchProperty(::quint32, ::quint64, "
