@@ -5,3 +5,15 @@ ddsrpc_add_idl(hello
   IDL "${CMAKE_CURRENT_SOURCE_DIR}/hello/hello.idl")
 target_link_libraries(hello PRIVATE
   Qt5::Core Qt5::Network Qt5::SerialPort ddsrpc::runtime)
+
+if(TARGET fastdds)
+  add_executable(fastdds_check fastdds_check/main.cpp)
+  ddsrpc_add_idl(fastdds_check
+    ROLES "service;client"
+    NAMESPACE demo
+    IDL "${CMAKE_CURRENT_SOURCE_DIR}/hello/hello.idl")
+  target_link_libraries(fastdds_check PRIVATE
+    Qt5::Core Qt5::Network Qt5::SerialPort ddsrpc::runtime)
+else()
+  message(STATUS "Fast DDS not available: skipping fastdds_check example")
+endif()

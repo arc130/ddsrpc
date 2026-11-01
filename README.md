@@ -24,7 +24,7 @@
 - `third_party/AsyncTask` = `d231d64`
 - GoogleTest 来自 Transport 的 vendored `third_party/googletest`
 
-Fast DDS 是 Transport 的可选依赖；本版本验收使用进程内 `FakeDdsProvider`，不要求安装 Fast DDS。
+Fast DDS 是 Transport 的可选依赖。基础验收使用进程内 `FakeDdsProvider`；安装 Fast DDS 后还会构建并验证跨进程 `fastdds_check` 示例。
 
 ## 构建与测试
 
@@ -69,6 +69,31 @@ make -j
 
 qmake 示例复用 `examples/hello/main.cpp`，链接 CMake 构建出的
 `libddsrpc_runtime.a`、`libtransport.a`、`libasynctask.a`。qmake 不是与 CMake 等价的完整构建体系。
+
+### Fast DDS 跨进程检查
+
+本工作区验证过 Fast DDS 3.6.1（Fast CDR 2.3.5、foonathan_memory 0.7-4，安装于 `/usr/local`）：
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug   -DDDSRPC_BUILD_EXAMPLES=ON -DCMAKE_PREFIX_PATH=/usr/local
+cmake --build build -j
+
+# 终端 A
+./build/bin/fastdds_check --role server --domain 43
+# 终端 B
+./build/bin/fastdds_check --role client --domain 43
+```
+
+预期客户端输出：
+
+```text
+FASTDDS_CLIENT_GREET=fastdds hello client
+FASTDDS_CLIENT_ANNOUNCED=1
+FASTDDS_CLIENT_COUNT=7
+```
+
+服务端输出 `FASTDDS_SERVER_READY domain=43`。该示例跨两个 OS 进程验证了 RPC、SIGNAL 发布订阅和 PROP 远端写入。
+Fast DDS 缺失时该示例不会构建，其余 FakeDdsProvider 测试不受影响。真实 Fast DDS 下的重连刷新尚未单独验证。
 
 ## IDL
 
@@ -189,7 +214,7 @@ transport.Close(); transport.WaitClosed()
 - 不自动重发重连前在途的 RPC；只自动刷新 `ready` 和 PROP 缓存。
 - 默认 DdsTransport 链路状态是端点整体聚合，不是按服务区分；同一 client node 挂多个服务时可能
   由其他端点状态触发刷新。
-- 验收使用 FakeDdsProvider；真实 Fast DDS 跨进程待后续验证。
+- FakeDdsProvider 是默认验收路径；真实 Fast DDS 跨进程已做基础 RPC/SIGNAL/PROP 验证，重连场景仍待验证。
 - 生成文件默认会被下一次生成覆盖；需要长期手改时修改生成器或停止重新生成。
 
 ## 测试

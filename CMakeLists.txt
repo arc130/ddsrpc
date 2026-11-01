@@ -18,6 +18,8 @@ set(ASYNCTASK_DIR "${DDSRPC_ASYNCTASK_DIR}" CACHE PATH "" FORCE)
 set(TRANSPORT_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(TRANSPORT_BUILD_PERF OFF CACHE BOOL "" FORCE)
 add_subdirectory("${DDSRPC_TRANSPORT_DIR}" third_party/transport)
+find_package(fastcdr QUIET)
+find_package(fastdds QUIET)
 # Transport 1c79cd5 的 asynctask 源清单漏掉了 AsyncTask d231d64 新增的
 # coro/detail/taskcancel.cpp，而 Coro::makeTask 需要其中的取消槽符号。
 # 由使用方补进目标，避免改动 third_party 子模块。
