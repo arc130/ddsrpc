@@ -44,6 +44,9 @@ target_include_directories(ddsrpc_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/in
 target_link_libraries(ddsrpc_runtime PUBLIC transport Qt5::Core Qt5::Network)
 target_compile_features(ddsrpc_runtime PUBLIC cxx_std_17)
 
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(DdsRpcHelpers)
+
 enable_testing()
 add_subdirectory(tools/ddsrpcgen)
 if(DDSRPC_BUILD_TESTS)

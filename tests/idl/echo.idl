@@ -1,0 +1,3 @@
+class Echo {
+    SLOT(QString echo(QString text))
+};
