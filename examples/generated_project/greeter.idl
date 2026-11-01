@@ -1,0 +1,10 @@
+// Input for the checked-in generated-code example.
+// Regenerate with:
+//   ddsrpcgen --role all --out-dir generated --namespace demo greeter.idl
+class Greeter {
+    PROP(int count = 0)
+    PROP(QString label READONLY)
+    SIGNAL(announced(int count))
+    SLOT(QString greet(QString name))
+    SLOT(void bump())
+};

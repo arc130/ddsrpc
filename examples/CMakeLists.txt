@@ -6,6 +6,9 @@ ddsrpc_add_idl(hello
 target_link_libraries(hello PRIVATE
   Qt5::Core Qt5::Network Qt5::SerialPort ddsrpc::runtime)
 
+# A standalone consumer project with checked-in generator output.
+add_subdirectory(generated_project)
+
 if(TARGET fastdds)
   add_executable(fastdds_check fastdds_check/main.cpp)
   ddsrpc_add_idl(fastdds_check

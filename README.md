@@ -53,6 +53,38 @@ count=1
 announced=1
 ```
 
+### 代码生成后的项目示例
+
+`examples/generated_project` 展示了 `ddsrpcgen` **生成结果已提交**时的工程结构：
+`generated/` 下直接包含 types/service/client 文件，构建时不再调用生成器。
+
+```bash
+cmake --build build --target generated_project_demo -j
+./build/bin/generated_project_demo
+```
+
+也可以把该目录当独立项目构建：
+
+```bash
+cmake -S examples/generated_project -B build-generated-project
+cmake --build build-generated-project -j
+./build-generated-project/generated_project_demo
+```
+
+预期输出：
+
+```text
+generated-project ready-before-service=0
+generated-project ready-after-service=1
+generated-project greet=hello generated
+generated-project count=1
+generated-project announced=1
+generated-project label=demo
+```
+
+该目录的 `README.md` 详细说明了生成物、Service 派生、Client 生命周期、信号/SLOT/属性
+用法、CMake 接入，以及“提交生成代码”与“构建时生成”两种方式的取舍。
+
 ### qmake 消费示例
 
 先由 CMake 构建生成器、runtime 和 Transport 静态库，再生成/构建 qmake 示例：
