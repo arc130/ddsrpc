@@ -9,15 +9,16 @@ namespace ddsrpcgen {
 namespace {
 
 [[nodiscard]] QString ReturnType(const SlotModel& slot) {
-  return slot.return_cpp_type.isEmpty() ? QStringLiteral("void")
-                                        : slot.return_cpp_type;
+  return slot.return_cpp_type.isEmpty()
+             ? QStringLiteral("void")
+             : QualifiedCppType(slot.return_cpp_type);
 }
 
 [[nodiscard]] QString Parameters(const QVector<ParamModel>& params) {
   QStringList parts;
   parts.reserve(params.size());
   for (const ParamModel& param : params) {
-    parts.append(param.cpp_type + QLatin1Char(' ') + param.name);
+    parts.append(QualifiedCppType(param.cpp_type) + QLatin1Char(' ') + param.name);
   }
   return parts.join(QStringLiteral(", "));
 }
@@ -43,19 +44,19 @@ void EmitClassEnums(CodeWriter& writer, const ClassModel& cls) {
 
 void EmitClassHeader(CodeWriter& writer, const ClassModel& cls) {
   writer.Line(QStringLiteral("class ") + cls.idl_name +
-              QStringLiteral("Client : public QObject, public ddsrpc::ClientBase {"));
+              QStringLiteral("Client : public ::QObject, public ::ddsrpc::ClientBase {"));
   writer.Line(QStringLiteral("  Q_OBJECT"));
   writer.Line();
   writer.Line(QStringLiteral("public:"));
   writer.Indent();
   writer.Line(QStringLiteral("struct Options {"));
   writer.Indent();
-  writer.Line(QStringLiteral("std::string service_name = \"") + cls.idl_name +
+  writer.Line(QStringLiteral("::std::string service_name = \"") + cls.idl_name +
               QStringLiteral("\";"));
   writer.Line(QStringLiteral(
-      "transport::RetryPolicy request_retry{std::chrono::milliseconds(2000), 3};"));
-  writer.Line(QStringLiteral("std::chrono::milliseconds handshake_interval{1000};"));
-  writer.Line(QStringLiteral("std::chrono::milliseconds link_poll_interval{100};"));
+      "::transport::RetryPolicy request_retry{::std::chrono::milliseconds(2000), 3};"));
+  writer.Line(QStringLiteral("::std::chrono::milliseconds handshake_interval{1000};"));
+  writer.Line(QStringLiteral("::std::chrono::milliseconds link_poll_interval{100};"));
   writer.Line();
   // GCC rejects a default argument inside the enclosing class when a nested
   // aggregate's default member initializers have not been parsed yet. A
@@ -66,9 +67,9 @@ void EmitClassHeader(CodeWriter& writer, const ClassModel& cls) {
   writer.Line(QStringLiteral("};"));
   writer.Line();
   writer.Line(QStringLiteral("explicit ") + cls.idl_name +
-              QStringLiteral("Client(transport::DdsNode& node, "
-                             "transport::DdsTransport& transport,"));
-  writer.Line(QStringLiteral("    Options options = {}, QObject* parent = nullptr);"));
+              QStringLiteral("Client(::transport::DdsNode& node, "
+                             "::transport::DdsTransport& transport,"));
+  writer.Line(QStringLiteral("    Options options = {}, ::QObject* parent = nullptr);"));
   writer.Line(QStringLiteral("~") + cls.idl_name + QStringLiteral("Client() override;"));
   writer.Line();
   writer.Line(cls.idl_name + QStringLiteral("Client(const ") + cls.idl_name +
@@ -78,21 +79,25 @@ void EmitClassHeader(CodeWriter& writer, const ClassModel& cls) {
   writer.Line();
   EmitClassEnums(writer, cls);
   writer.Line(QStringLiteral("// Lifecycle: call stop() before destruction. The destructor"));
-  writer.Line(QStringLiteral("// neither joins fibers nor calls virtual hooks; destroying a"));
-  writer.Line(QStringLiteral("// running client is a usage error."));
+  writer.Line(QStringLiteral("// is defaulted: it neither calls stop(), joins fibers, nor calls"));
+  writer.Line(QStringLiteral("// virtual hooks. Destroying a running client is a usage error."));
   writer.Line(QStringLiteral("//"));
-  writer.Line(QStringLiteral("// Do not call stop() from readyChanged, syncFailed, or any event"));
-  writer.Line(QStringLiteral("// handler: those run on the event fiber that stop() joins, so the"));
-  writer.Line(QStringLiteral("// call would self-join. Defer it to the next Qt event-loop turn."));
+  writer.Line(QStringLiteral("// readyChanged/syncFailed may be emitted on the link-monitor"));
+  writer.Line(QStringLiteral("// fiber (HandleLinkState), on the event fiber (event protocol"));
+  writer.Line(QStringLiteral("// failures), or on the fiber calling refreshProperties()/stop()."));
+  writer.Line(QStringLiteral("// IDL signal/property handlers run on the event fiber. Do not call"));
+  writer.Line(QStringLiteral("// stop() from any of these callbacks: the link monitor would"));
+  writer.Line(QStringLiteral("// cancel/join itself and the event fiber would self-join. Defer"));
+  writer.Line(QStringLiteral("// stop() to the next Qt event-loop turn."));
   writer.Line(QStringLiteral("// Those callbacks may safely call refreshProperties() or slots."));
   // ClientBase exposes Prepare (capitalized); the facade adds the lowercase
   // lifecycle name used by the public design. start()/stop() are generated.
-  writer.Line(QStringLiteral("Coro::Result<void> prepare();"));
-  writer.Line(QStringLiteral("Coro::Result<void> start();"));
-  writer.Line(QStringLiteral("Coro::Result<void> stop();"));
+  writer.Line(QStringLiteral("::Coro::Result<void> prepare();"));
+  writer.Line(QStringLiteral("::Coro::Result<void> start();"));
+  writer.Line(QStringLiteral("::Coro::Result<void> stop();"));
   writer.Line();
   for (const SlotModel& slot : cls.slots) {
-    writer.Line(QStringLiteral("Coro::Result<") + ReturnType(slot) + QStringLiteral("> ") +
+    writer.Line(QStringLiteral("::Coro::Result<") + ReturnType(slot) + QStringLiteral("> ") +
                 slot.name + QLatin1Char('(') + Parameters(slot.params) +
                 QStringLiteral(");"));
   }
@@ -105,30 +110,31 @@ void EmitClassHeader(CodeWriter& writer, const ClassModel& cls) {
                 Parameters(signal.params) + QStringLiteral(");"));
   }
   writer.Line(QStringLiteral("void readyChanged(bool ready);"));
-  writer.Line(QStringLiteral("void syncFailed(QString message);"));
+  writer.Line(QStringLiteral("void syncFailed(::QString message);"));
   writer.Dedent();
   writer.Line();
   writer.Line(QStringLiteral("protected:"));
   writer.Indent();
   writer.Line(QStringLiteral("void ResetPropertiesForResync() override;"));
   writer.Line(QStringLiteral(
-      "Coro::Result<void> ApplyPropertySnapshot(QDataStream& in) override;"));
+      "::Coro::Result<void> ApplyPropertySnapshot(::QDataStream& in) override;"));
   writer.Line(QStringLiteral(
-      "void DispatchSignal(quint32 event_id, QDataStream& in) override;"));
+      "void DispatchSignal(::quint32 event_id, ::QDataStream& in) override;"));
   writer.Line(QStringLiteral(
-      "void DispatchProperty(quint32 event_id, quint64 revision, QDataStream& in) override;"));
+      "void DispatchProperty(::quint32 event_id, ::quint64 revision, "
+      "::QDataStream& in) override;"));
   writer.Line(QStringLiteral("void EmitReadyChanged(bool ready) override;"));
-  writer.Line(QStringLiteral("void EmitSyncFailed(const QString& message) override;"));
+  writer.Line(QStringLiteral("void EmitSyncFailed(const ::QString& message) override;"));
   writer.Dedent();
   writer.Line();
   writer.Line(QStringLiteral("private:"));
   writer.Indent();
   writer.Line(QStringLiteral("void LinkMonitorLoop();"));
   writer.Line();
-  writer.Line(QStringLiteral("transport::DdsTransport& transport_;"));
+  writer.Line(QStringLiteral("::transport::DdsTransport& transport_;"));
   writer.Line(QStringLiteral("Options options_;"));
-  writer.Line(QStringLiteral("std::shared_ptr<Coro::FiberTask<void>> link_monitor_;"));
-  writer.Line(QStringLiteral("boost::fibers::fiber::id link_monitor_fiber_{};"));
+  writer.Line(QStringLiteral("::std::shared_ptr<::Coro::FiberTask<void>> link_monitor_;"));
+  writer.Line(QStringLiteral("::boost::fibers::fiber::id link_monitor_fiber_{};"));
   writer.Line(QStringLiteral("bool running_ = false;"));
   writer.Dedent();
   writer.Line(QStringLiteral("};"));
@@ -137,22 +143,24 @@ void EmitClassHeader(CodeWriter& writer, const ClassModel& cls) {
 void EmitConstructor(CodeWriter& writer, const FileModel& file, const ClassModel& cls) {
   const QString name = cls.idl_name + QStringLiteral("Client");
   writer.Line(name + QLatin1String("::") + name +
-              QStringLiteral("(transport::DdsNode& node, "
-                             "transport::DdsTransport& transport,"));
-  writer.Line(QStringLiteral("    Options options, QObject* parent)"));
-  writer.Line(QStringLiteral("    : QObject(parent),"));
-  writer.Line(QStringLiteral("      ddsrpc::ClientBase(node,"));
-  writer.Line(QStringLiteral("                         ddsrpc::ClientConfig{options.service_name,"));
+              QStringLiteral("(::transport::DdsNode& node, "
+                             "::transport::DdsTransport& transport,"));
+  writer.Line(QStringLiteral("    Options options, ::QObject* parent)"));
+  writer.Line(QStringLiteral("    : ::QObject(parent),"));
+  writer.Line(QStringLiteral("      ::ddsrpc::ClientBase(node,"));
   writer.Line(QStringLiteral(
-      "                                              \"ddsrpc.\" + options.service_name + "
-      "\".events\","));
-  writer.Line(QStringLiteral("                                              ") + HashLiteral(file) +
-              QStringLiteral(","));
-  writer.Line(QStringLiteral("                                              options.request_retry,"));
+      "                           ::ddsrpc::ClientConfig{options.service_name,"));
   writer.Line(QStringLiteral(
-      "                                              options.handshake_interval}),"));
+      "                                                 \"ddsrpc.\" + "
+      "options.service_name + \".events\","));
+  writer.Line(QStringLiteral("                                                 ") +
+              HashLiteral(file) + QStringLiteral(","));
+  writer.Line(QStringLiteral("                                                 "
+                             "options.request_retry,"));
+  writer.Line(QStringLiteral(
+      "                                                 options.handshake_interval}),"));
   writer.Line(QStringLiteral("      transport_(transport),"));
-  writer.Line(QStringLiteral("      options_(std::move(options)) {"));
+  writer.Line(QStringLiteral("      options_(::std::move(options)) {"));
   writer.Indent();
   writer.Line(QStringLiteral("registerTypes();"));
   writer.Dedent();
@@ -160,10 +168,10 @@ void EmitConstructor(CodeWriter& writer, const FileModel& file, const ClassModel
   writer.Line();
   writer.Line(name + QStringLiteral("::Options::Options() = default;"));
   writer.Line();
-  writer.Line(QStringLiteral("Coro::Result<void> ") + name +
+  writer.Line(QStringLiteral("::Coro::Result<void> ") + name +
               QStringLiteral("::prepare() {"));
   writer.Indent();
-  writer.Line(QStringLiteral("return Prepare();"));
+  writer.Line(QStringLiteral("return this->Prepare();"));
   writer.Dedent();
   writer.Line(QStringLiteral("}"));
 }
@@ -175,36 +183,45 @@ void EmitDestructor(CodeWriter& writer, const ClassModel& cls) {
 
 void EmitStartStop(CodeWriter& writer, const ClassModel& cls) {
   const QString name = cls.idl_name + QStringLiteral("Client");
-  writer.Line(QStringLiteral("Coro::Result<void> ") + name + QStringLiteral("::start() {"));
+  writer.Line(QStringLiteral("::Coro::Result<void> ") + name + QStringLiteral("::start() {"));
   writer.Indent();
   writer.Line(QStringLiteral("if (running_) {"));
   writer.Indent();
-  writer.Line(QStringLiteral("return ddsrpc::make_error_code(ddsrpc::RpcErrc::kInvalidState);"));
+  writer.Line(
+      QStringLiteral("return ::ddsrpc::make_error_code(::ddsrpc::RpcErrc::kInvalidState);"));
   writer.Dedent();
   writer.Line(QStringLiteral("}"));
-  writer.Line(QStringLiteral("auto started = StartEvents();"));
+  writer.Line(QStringLiteral("auto started = this->StartEvents();"));
   writer.Line(QStringLiteral("if (!started) return started;"));
   writer.Line(QStringLiteral("running_ = true;"));
-  writer.Line(QStringLiteral("link_monitor_ = std::make_shared<Coro::FiberTask<void>>("));
+  writer.Line(QStringLiteral("link_monitor_ = ::std::make_shared<::Coro::FiberTask<void>>("));
   writer.Indent();
-  writer.Line(QStringLiteral("Coro::makeTask([this] { LinkMonitorLoop(); }, "
-                             "Coro::Priority::Normal,"));
-  writer.Line(QStringLiteral("                   "
-                             "Coro::Affinity::fixed(std::this_thread::get_id())));"));
+  writer.Line(QStringLiteral("::Coro::makeTask([this] { this->LinkMonitorLoop(); }, "
+                             "::Coro::Priority::Normal,"));
+  writer.Line(QStringLiteral("                 "
+                             "::Coro::Affinity::fixed(::std::this_thread::get_id())));"));
   writer.Dedent();
   writer.Line(QStringLiteral("return {};"));
   writer.Dedent();
   writer.Line(QStringLiteral("}"));
   writer.Line();
-  writer.Line(QStringLiteral("Coro::Result<void> ") + name + QStringLiteral("::stop() {"));
+  writer.Line(QStringLiteral("::Coro::Result<void> ") + name + QStringLiteral("::stop() {"));
   writer.Indent();
   writer.Line(QStringLiteral("if (!running_) return {};"));
   writer.Line(QStringLiteral("if (link_monitor_ &&"));
-  writer.Line(QStringLiteral("    link_monitor_fiber_ == boost::this_fiber::get_id()) {"));
+  writer.Line(QStringLiteral(
+      "    link_monitor_fiber_ == ::boost::this_fiber::get_id()) {"));
   writer.Indent();
-  // readyChanged/syncFailed are emitted from the link monitor fiber; joining
-  // that fiber from its own callback would deadlock.
-  writer.Line(QStringLiteral("return ddsrpc::make_error_code(ddsrpc::RpcErrc::kInvalidState);"));
+  // readyChanged/syncFailed can be emitted from the link monitor fiber; the
+  // generated stop would cancel/join that same fiber. Diagnose and let the
+  // caller retry outside the callback.
+  writer.Line(QStringLiteral("::QMessageLogger(__FILE__, __LINE__, __func__)"));
+  writer.Indent();
+  writer.Line(QStringLiteral(".warning(\"ddsrpc: stop() called from the link-monitor "
+                             "callback; defer it until the callback returns\");"));
+  writer.Dedent();
+  writer.Line(
+      QStringLiteral("return ::ddsrpc::make_error_code(::ddsrpc::RpcErrc::kInvalidState);"));
   writer.Dedent();
   writer.Line(QStringLiteral("}"));
   writer.Line(QStringLiteral("if (link_monitor_) {"));
@@ -214,7 +231,7 @@ void EmitStartStop(CodeWriter& writer, const ClassModel& cls) {
   writer.Line(QStringLiteral("link_monitor_.reset();"));
   writer.Dedent();
   writer.Line(QStringLiteral("}"));
-  writer.Line(QStringLiteral("auto stopped = StopEndpoint();"));
+  writer.Line(QStringLiteral("auto stopped = this->StopEndpoint();"));
   writer.Line(QStringLiteral("if (!stopped) return stopped;"));
   // Keep running_ set on failure: StopEndpoint refuses a self-join from an
   // event callback, and a later stop() outside the callback must retry.
@@ -234,43 +251,44 @@ void EmitSlotMethod(CodeWriter& writer, const ClassModel& cls, const SlotModel& 
   const QString in_name = UniqueLocal(QStringLiteral("in"), &taken);
   const QString value_name = UniqueLocal(QStringLiteral("value"), &taken);
 
-  writer.Line(QStringLiteral("Coro::Result<") + ReturnType(slot) + QStringLiteral("> ") +
+  writer.Line(QStringLiteral("::Coro::Result<") + ReturnType(slot) + QStringLiteral("> ") +
               name + QLatin1String("::") + slot.name + QLatin1Char('(') +
               Parameters(slot.params) + QStringLiteral(") {"));
   writer.Indent();
-  writer.Line(QStringLiteral("QByteArray ") + args_name + QLatin1Char(';'));
+  writer.Line(QStringLiteral("::QByteArray ") + args_name + QLatin1Char(';'));
   if (!slot.params.isEmpty()) {
-    writer.Line(QStringLiteral("QDataStream ") + out_name + QStringLiteral("(&") +
-                args_name + QStringLiteral(", QIODevice::WriteOnly);"));
-    writer.Line(QStringLiteral("ddsrpc::wire::Begin(") + out_name + QStringLiteral(");"));
+    writer.Line(QStringLiteral("::QDataStream ") + out_name + QStringLiteral("(&") +
+                args_name + QStringLiteral(", ::QIODevice::WriteOnly);"));
+    writer.Line(QStringLiteral("::ddsrpc::wire::Begin(") + out_name + QStringLiteral(");"));
     for (const ParamModel& param : slot.params) {
       writer.Line(out_name + QStringLiteral(" << ") + param.name + QLatin1Char(';'));
     }
     writer.Line(QStringLiteral("if (") + out_name +
-                QStringLiteral(".status() != QDataStream::Ok) {"));
+                QStringLiteral(".status() != ::QDataStream::Ok) {"));
     writer.Indent();
-    writer.Line(QStringLiteral(
-        "return ddsrpc::make_error_code(ddsrpc::RpcErrc::kEncode);"));
+    writer.Line(
+        QStringLiteral("return ::ddsrpc::make_error_code(::ddsrpc::RpcErrc::kEncode);"));
     writer.Dedent();
     writer.Line(QStringLiteral("}"));
   }
-  writer.Line(QStringLiteral("auto ") + reply_name + QStringLiteral(" = Call(") +
+  // this-> keeps a parameter or generated name from hiding the base method.
+  writer.Line(QStringLiteral("auto ") + reply_name + QStringLiteral(" = this->Call(") +
               QString::number(slot.op) + QStringLiteral(", ") + args_name +
               QStringLiteral(");"));
   writer.Line(QStringLiteral("if (!") + reply_name + QStringLiteral(") return ") +
               reply_name + QStringLiteral(".error();"));
 
   if (ReturnType(slot) != QStringLiteral("void")) {
-    writer.Line(QStringLiteral("QDataStream ") + in_name + QStringLiteral("(") +
+    writer.Line(QStringLiteral("::QDataStream ") + in_name + QStringLiteral("(") +
                 reply_name + QStringLiteral(".value());"));
-    writer.Line(QStringLiteral("ddsrpc::wire::Begin(") + in_name + QStringLiteral(");"));
+    writer.Line(QStringLiteral("::ddsrpc::wire::Begin(") + in_name + QStringLiteral(");"));
     writer.Line(ReturnType(slot) + QLatin1Char(' ') + value_name + QStringLiteral("{};"));
     writer.Line(in_name + QStringLiteral(" >> ") + value_name + QLatin1Char(';'));
     writer.Line(QStringLiteral("if (") + in_name +
-                QStringLiteral(".status() != QDataStream::Ok) {"));
+                QStringLiteral(".status() != ::QDataStream::Ok) {"));
     writer.Indent();
-    writer.Line(QStringLiteral(
-        "return ddsrpc::make_error_code(ddsrpc::RpcErrc::kDecode);"));
+    writer.Line(
+        QStringLiteral("return ::ddsrpc::make_error_code(::ddsrpc::RpcErrc::kDecode);"));
     writer.Dedent();
     writer.Line(QStringLiteral("}"));
     writer.Line(QStringLiteral("return ") + value_name + QLatin1Char(';'));
@@ -287,22 +305,22 @@ void EmitPropertyAndEventHooks(CodeWriter& writer, const ClassModel& cls) {
   writer.Line(QStringLiteral("void ") + name +
               QStringLiteral("::ResetPropertiesForResync() {}"));
   writer.Line();
-  writer.Line(QStringLiteral("Coro::Result<void> ") + name +
-              QStringLiteral("::ApplyPropertySnapshot(QDataStream& in) {"));
+  writer.Line(QStringLiteral("::Coro::Result<void> ") + name +
+              QStringLiteral("::ApplyPropertySnapshot(::QDataStream& in) {"));
   writer.Indent();
-  writer.Line(QStringLiteral("quint32 count = 0;"));
+  writer.Line(QStringLiteral("::quint32 count = 0;"));
   writer.Line(QStringLiteral("in >> count;"));
-  writer.Line(QStringLiteral("if (in.status() != QDataStream::Ok) {"));
+  writer.Line(QStringLiteral("if (in.status() != ::QDataStream::Ok) {"));
   writer.Indent();
-  writer.Line(QStringLiteral(
-      "return ddsrpc::make_error_code(ddsrpc::RpcErrc::kDecode);"));
+  writer.Line(
+      QStringLiteral("return ::ddsrpc::make_error_code(::ddsrpc::RpcErrc::kDecode);"));
   writer.Dedent();
   writer.Line(QStringLiteral("}"));
   writer.Line(QStringLiteral("// Task 14 replaces this with the generated property table."));
   writer.Line(QStringLiteral("if (count != 0) {"));
   writer.Indent();
-  writer.Line(QStringLiteral(
-      "return ddsrpc::make_error_code(ddsrpc::RpcErrc::kProtocol);"));
+  writer.Line(
+      QStringLiteral("return ::ddsrpc::make_error_code(::ddsrpc::RpcErrc::kProtocol);"));
   writer.Dedent();
   writer.Line(QStringLiteral("}"));
   writer.Line(QStringLiteral("return {};"));
@@ -310,10 +328,11 @@ void EmitPropertyAndEventHooks(CodeWriter& writer, const ClassModel& cls) {
   writer.Line(QStringLiteral("}"));
   writer.Line();
   writer.Line(QStringLiteral("void ") + name +
-              QStringLiteral("::DispatchSignal(quint32, QDataStream&) {}"));
+              QStringLiteral("::DispatchSignal(::quint32, ::QDataStream&) {}"));
   writer.Line();
   writer.Line(QStringLiteral("void ") + name +
-              QStringLiteral("::DispatchProperty(quint32, quint64, QDataStream&) {}"));
+              QStringLiteral("::DispatchProperty(::quint32, ::quint64, "
+                             "::QDataStream&) {}"));
   writer.Line();
   writer.Line(QStringLiteral("void ") + name +
               QStringLiteral("::EmitReadyChanged(bool ready) {"));
@@ -323,7 +342,7 @@ void EmitPropertyAndEventHooks(CodeWriter& writer, const ClassModel& cls) {
   writer.Line(QStringLiteral("}"));
   writer.Line();
   writer.Line(QStringLiteral("void ") + name +
-              QStringLiteral("::EmitSyncFailed(const QString& message) {"));
+              QStringLiteral("::EmitSyncFailed(const ::QString& message) {"));
   writer.Indent();
   writer.Line(QStringLiteral("Q_EMIT syncFailed(message);"));
   writer.Dedent();
@@ -334,22 +353,22 @@ void EmitLinkMonitor(CodeWriter& writer, const ClassModel& cls) {
   const QString name = cls.idl_name + QStringLiteral("Client");
   writer.Line(QStringLiteral("void ") + name + QStringLiteral("::LinkMonitorLoop() {"));
   writer.Indent();
-  writer.Line(QStringLiteral("link_monitor_fiber_ = boost::this_fiber::get_id();"));
+  writer.Line(QStringLiteral("link_monitor_fiber_ = ::boost::this_fiber::get_id();"));
   writer.Line(QStringLiteral("for (;;) {"));
   writer.Indent();
   writer.Line(QStringLiteral("const auto state = transport_.CurrentLinkState();"));
-  writer.Line(QStringLiteral("(void)HandleLinkState(state);"));
-  writer.Line(QStringLiteral("const auto interval = (!ready() && "
-                             "state == transport::LinkState::kUp)"));
+  writer.Line(QStringLiteral("(void)this->HandleLinkState(state);"));
+  writer.Line(QStringLiteral("const auto interval = (!this->ready() && "
+                             "state == ::transport::LinkState::kUp)"));
   writer.Indent();
   writer.Line(QStringLiteral("? options_.handshake_interval"));
   writer.Line(QStringLiteral(": options_.link_poll_interval;"));
   writer.Dedent();
-  writer.Line(QStringLiteral("const auto delayed = Coro::delay_for(interval);"));
+  writer.Line(QStringLiteral("const auto delayed = ::Coro::delay_for(interval);"));
   writer.Line(QStringLiteral("if (!delayed) break;"));
   writer.Dedent();
   writer.Line(QStringLiteral("}"));
-  writer.Line(QStringLiteral("link_monitor_fiber_ = boost::fibers::fiber::id();"));
+  writer.Line(QStringLiteral("link_monitor_fiber_ = ::boost::fibers::fiber::id();"));
   writer.Dedent();
   writer.Line(QStringLiteral("}"));
 }
@@ -407,6 +426,7 @@ QString EmitClientSource(const FileModel& file, const QString& name_space) {
   if (file.classes.isEmpty()) return writer.Text();
 
   writer.Line();
+  writer.Line(QStringLiteral("#include <QDebug>"));
   writer.Line(QStringLiteral("#include <QIODevice>"));
   writer.Line(QStringLiteral("#include <thread>"));
   writer.Line(QStringLiteral("#include <utility>"));

@@ -344,14 +344,20 @@ std::optional<TypeRef> Parser::ParseType() {
   TypeRef ref;
   ref.is_const = MatchIdentifier(QStringLiteral("const"));
 
-  // Consume multi-word builtin specifiers such as "unsigned long long" and
-  // "long double". A qualifier is only consumed when another qualifier or a
-  // builtin type word follows; otherwise it is itself the base type so that
-  // "unsigned value" still parses as type "unsigned" + name "value".
-  while (Check(TokenKind::Identifier) && IsTypeQualifier(Peek().text)) {
+  // Consume multi-word builtin specifiers such as "unsigned long long",
+  // "long double", and repeated/ill-formed sequences such as "double double"
+  // or "signed signed char". A word is consumed only when another builtin
+  // specifier follows; otherwise it is itself the base type so that
+  // "unsigned value" still parses as type "unsigned" + name "value". The
+  // semantic layer validates the resulting spelling and reports duplicate or
+  // contradictory specifiers with an actionable diagnostic.
+  const auto is_specifier = [](const QString& text) {
+    return IsTypeQualifier(text) || IsBuiltinTypeWord(text);
+  };
+  while (Check(TokenKind::Identifier) && is_specifier(Peek().text)) {
     const Token& next = Peek(1);
-    const bool continues = next.kind == TokenKind::Identifier &&
-                           (IsTypeQualifier(next.text) || IsBuiltinTypeWord(next.text));
+    const bool continues =
+        next.kind == TokenKind::Identifier && is_specifier(next.text);
     if (!continues) break;
     Consume();
   }

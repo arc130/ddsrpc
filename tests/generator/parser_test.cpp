@@ -221,6 +221,31 @@ TEST(ParserTest, ParsesMultiWordQualifiersAndFoldedReferences) {
   EXPECT_EQ(fields[4].type.base, QStringLiteral("short"));
 }
 
+TEST(ParserTest, FoldsRepeatedBuiltinSpecifiersForSemanticDiagnostics) {
+  const QString source = QStringLiteral(
+      "POD Weird(double double a, signed signed char b, unsigned unsigned int c, "
+      "bool bool d, void void e)\n");
+  Diagnostics diagnostics;
+  Lexer lexer(QStringLiteral("weird.idl"), source, diagnostics);
+  Parser parser(QStringLiteral("weird.idl"), lexer.Scan(), source, diagnostics);
+  const auto ast = parser.Parse();
+
+  ASSERT_TRUE(ast.has_value()) << diagnostics.Format().toStdString();
+  ASSERT_EQ(ast->pods.size(), 1);
+  const auto& fields = ast->pods[0].fields;
+  ASSERT_EQ(fields.size(), 5);
+  EXPECT_EQ(fields[0].type.spelling, QStringLiteral("double double"));
+  EXPECT_EQ(fields[0].type.base, QStringLiteral("double"));
+  EXPECT_EQ(fields[1].type.spelling, QStringLiteral("signed signed char"));
+  EXPECT_EQ(fields[1].type.base, QStringLiteral("char"));
+  EXPECT_EQ(fields[2].type.spelling, QStringLiteral("unsigned unsigned int"));
+  EXPECT_EQ(fields[2].type.base, QStringLiteral("int"));
+  EXPECT_EQ(fields[3].type.spelling, QStringLiteral("bool bool"));
+  EXPECT_EQ(fields[3].type.base, QStringLiteral("bool"));
+  EXPECT_EQ(fields[4].type.spelling, QStringLiteral("void void"));
+  EXPECT_EQ(fields[4].type.base, QStringLiteral("void"));
+}
+
 TEST(ParserTest, ParsesUnnamedParamsAndImplicitVoidReturn) {
   const QString source = QStringLiteral(
       "class C {\n"

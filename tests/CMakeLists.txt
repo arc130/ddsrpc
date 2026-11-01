@@ -8,11 +8,14 @@ add_executable(ddsrpcgen_tests
 target_link_libraries(ddsrpcgen_tests PRIVATE ddsrpcgen_lib GTest::gtest_main Qt5::Core)
 add_test(NAME ddsrpcgen_tests COMMAND ddsrpcgen_tests)
 
-# Compile/link smoke for the generated service and client. Task 12 will move
-# this to the general ddsrpc_add_idl helper; until then a local custom command
-# keeps the accepted builtin/container wire policy under the compiler.
+# Compile/link smoke for the generated service and client. Task 12 replaces
+# this local custom command with ddsrpc_add_idl (keeping the fixture and this
+# executable, so the accepted builtin/container and hostile-name policies stay
+# under the compiler). The generator's depfile is declared as a byproduct so
+# Makefiles do not see an undeclared output.
 set(DDSRPC_SMOKE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated_smoke")
 set(DDSRPC_SMOKE_IDL "${CMAKE_CURRENT_SOURCE_DIR}/idl/builtin_types.idl")
+set(DDSRPC_SMOKE_DEPFILE "${DDSRPC_SMOKE_DIR}/ddsrpc-smoke.d")
 set(DDSRPC_SMOKE_TYPES "${DDSRPC_SMOKE_DIR}/builtin_types.ddsrpc.types.h")
 set(DDSRPC_SMOKE_SERVICE_H "${DDSRPC_SMOKE_DIR}/builtin_types.ddsrpc.service.h")
 set(DDSRPC_SMOKE_SERVICE_CPP "${DDSRPC_SMOKE_DIR}/builtin_types.ddsrpc.service.cpp")
@@ -30,7 +33,9 @@ add_custom_command(
           --role all
           --out-dir "${DDSRPC_SMOKE_DIR}"
           --namespace ddsrpc_smoke
+          --depfile "${DDSRPC_SMOKE_DEPFILE}"
           "${DDSRPC_SMOKE_IDL}"
+  BYPRODUCTS "${DDSRPC_SMOKE_DEPFILE}"
   DEPENDS ddsrpcgen "${DDSRPC_SMOKE_IDL}"
   COMMENT "Generating ddsrpc compile-smoke sources"
   VERBATIM)

@@ -31,4 +31,15 @@ class BuiltinApi {
     // Emitter-local names used as parameters must not break generated code.
     SLOT(int args(int args, int reply, int in, int out))
     SLOT(QVector<int> values(QVector<int> input))
+    // Namespace/type/function names as parameters; generated code must fully
+    // qualify its own types and call base methods through this->.
+    SLOT(int hostileNames(int ddsrpc, int QByteArray, int QDataStream, int Coro,
+                          int QString, int Call, int transport, int std, int boost))
+    // A parameter named like a type must not shadow a later parameter's type.
+    SLOT(QByteArray shadowedBlob(int QByteArray, QByteArray payload))
+    SLOT(QString shadowedText(int QString, QString label))
+    SLOT(QVector<int> shadowedVector(int QVector, QVector<int> items))
+    SLOT(BuiltinValues namespaceShadow(int ddsrpc_smoke, BuiltinValues value))
+    // Service/client local names used as parameters must be uniquified.
+    SLOT(int locals(int result, int payload, int out, int reply, int in, int value))
 };

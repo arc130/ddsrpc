@@ -70,12 +70,14 @@ TEST(CodegenTest, EmitsServiceAndClientForSlots) {
   file.classes = {cls};
   const QString service_h = ddsrpcgen::EmitServiceHeader(file, QStringLiteral("demo"));
   EXPECT_NE(service_h.indexOf(QStringLiteral("class CalcService")), -1);
-  EXPECT_NE(service_h.indexOf(QStringLiteral("virtual Coro::Result<int> add(int a, int b) = 0;")), -1);
+  EXPECT_NE(service_h.indexOf(QStringLiteral(
+                "virtual ::Coro::Result<int> add(int a, int b) = 0;")),
+            -1);
   const QString client_h = ddsrpcgen::EmitClientHeader(file, QStringLiteral("demo"));
   EXPECT_NE(client_h.indexOf(QStringLiteral("class CalcClient")), -1);
   EXPECT_NE(client_h.indexOf(QStringLiteral("Q_OBJECT")), -1);
-  EXPECT_NE(client_h.indexOf(QStringLiteral("Coro::Result<int> add(int a, int b)")), -1);
-  EXPECT_NE(client_h.indexOf(QStringLiteral("transport::DdsTransport& transport")), -1);
+  EXPECT_NE(client_h.indexOf(QStringLiteral("::Coro::Result<int> add(int a, int b)")), -1);
+  EXPECT_NE(client_h.indexOf(QStringLiteral("::transport::DdsTransport& transport")), -1);
 }
 
 TEST(CodegenTest, EmitsServiceLifecycleAndRpcDispatch) {
@@ -104,20 +106,24 @@ TEST(CodegenTest, EmitsServiceLifecycleAndRpcDispatch) {
   file.classes = {cls};
 
   const QString header = ddsrpcgen::EmitServiceHeader(file, QStringLiteral("demo"));
-  EXPECT_NE(header.indexOf(QStringLiteral("class CalcService : public ddsrpc::ServiceBase")), -1);
+  EXPECT_NE(header.indexOf(QStringLiteral(
+                "class CalcService : public ::ddsrpc::ServiceBase")),
+            -1);
   EXPECT_NE(header.indexOf(QStringLiteral("struct Options")), -1);
-  EXPECT_NE(header.indexOf(QStringLiteral("std::string service_name = \"Calc\";")), -1);
+  EXPECT_NE(header.indexOf(QStringLiteral("::std::string service_name = \"Calc\";")), -1);
   // Nested defaults plus an in-class `Options options = {}` default argument
   // are rejected by GCC 9; the out-of-line constructor avoids that.
   EXPECT_NE(header.indexOf(QStringLiteral("Options();")), -1);
-  EXPECT_NE(header.indexOf(QStringLiteral("Coro::Result<void> prepare();")), -1);
-  EXPECT_NE(header.indexOf(QStringLiteral("Coro::Result<void> start();")), -1);
-  EXPECT_NE(header.indexOf(QStringLiteral("Coro::Result<void> stop();")), -1);
+  EXPECT_NE(header.indexOf(QStringLiteral("::Coro::Result<void> prepare();")), -1);
+  EXPECT_NE(header.indexOf(QStringLiteral("::Coro::Result<void> start();")), -1);
+  EXPECT_NE(header.indexOf(QStringLiteral("::Coro::Result<void> stop();")), -1);
   EXPECT_NE(header.indexOf(QStringLiteral("using State = Calc_State;")), -1);
   EXPECT_NE(header.indexOf(QStringLiteral(
-                "ddsrpc::OperationResult HandleOperation(quint32 op, QDataStream& args) override;")),
+                "::ddsrpc::OperationResult HandleOperation(::quint32 op, "
+                "::QDataStream& args) override;")),
             -1);
-  EXPECT_NE(header.indexOf(QStringLiteral("ddsrpc::OperationResult BuildPropertySnapshot() override;")),
+  EXPECT_NE(header.indexOf(QStringLiteral(
+                "::ddsrpc::OperationResult BuildPropertySnapshot() override;")),
             -1);
 
   const QString source = ddsrpcgen::EmitServiceSource(file, QStringLiteral("demo"));
@@ -125,23 +131,26 @@ TEST(CodegenTest, EmitsServiceLifecycleAndRpcDispatch) {
   EXPECT_NE(source.indexOf(QStringLiteral("\"ddsrpc.\" + options.service_name + \".events\"")), -1);
   EXPECT_NE(source.indexOf(QStringLiteral("registerTypes();")), -1);
   EXPECT_NE(source.indexOf(QStringLiteral("CalcService::prepare()")), -1);
-  EXPECT_NE(source.indexOf(QStringLiteral("return Prepare();")), -1);
-  EXPECT_NE(source.indexOf(QStringLiteral("return Start();")), -1);
-  EXPECT_NE(source.indexOf(QStringLiteral("return Stop();")), -1);
+  EXPECT_NE(source.indexOf(QStringLiteral("return this->Prepare();")), -1);
+  EXPECT_NE(source.indexOf(QStringLiteral("return this->Start();")), -1);
+  EXPECT_NE(source.indexOf(QStringLiteral("return this->Stop();")), -1);
   EXPECT_NE(source.indexOf(QStringLiteral("case 1:")), -1);
   EXPECT_NE(source.indexOf(QStringLiteral("args >> a;")), -1);
   EXPECT_NE(source.indexOf(QStringLiteral("args >> b;")), -1);
-  EXPECT_NE(source.indexOf(QStringLiteral("args.status() != QDataStream::Ok")), -1);
+  EXPECT_NE(source.indexOf(QStringLiteral("args.status() != ::QDataStream::Ok")), -1);
   // this-> keeps a parameter with the slot's name from hiding the virtual.
   EXPECT_NE(source.indexOf(QStringLiteral("const auto result = this->add(a, b);")), -1);
-  EXPECT_NE(source.indexOf(QStringLiteral("ddsrpc::wire::Begin(out);")), -1);
+  EXPECT_NE(source.indexOf(QStringLiteral("::ddsrpc::wire::Begin(out);")), -1);
   EXPECT_NE(source.indexOf(QStringLiteral("out << result.value();")), -1);
   EXPECT_NE(source.indexOf(QStringLiteral("case 2:")), -1);
   EXPECT_NE(source.indexOf(QStringLiteral("const auto result = this->reset();")), -1);
-  EXPECT_NE(source.indexOf(QStringLiteral("ddsrpc::RpcErrc::kDecode")), -1);
-  EXPECT_NE(source.indexOf(QStringLiteral("ddsrpc::RpcErrc::kEncode")), -1);
-  EXPECT_NE(source.indexOf(QStringLiteral("ddsrpc::RpcErrc::kInvalidArgument")), -1);
-  EXPECT_NE(source.indexOf(QStringLiteral("out << quint32(0);")), -1);
+  EXPECT_NE(source.indexOf(QStringLiteral("::ddsrpc::RpcErrc::kDecode")), -1);
+  EXPECT_NE(source.indexOf(QStringLiteral("::ddsrpc::RpcErrc::kEncode")), -1);
+  EXPECT_NE(source.indexOf(QStringLiteral("::ddsrpc::RpcErrc::kInvalidArgument")), -1);
+  EXPECT_NE(source.indexOf(QStringLiteral("::QByteArray payload;")), -1);
+  EXPECT_NE(source.indexOf(QStringLiteral("::QDataStream out(&payload, ::QIODevice::WriteOnly);")),
+            -1);
+  EXPECT_NE(source.indexOf(QStringLiteral("out << ::quint32(0);")), -1);
 }
 
 TEST(CodegenTest, EmitsClientLifecycleSignalsAndSlotCalls) {
@@ -175,58 +184,139 @@ TEST(CodegenTest, EmitsClientLifecycleSignalsAndSlotCalls) {
 
   const QString header = ddsrpcgen::EmitClientHeader(file, QStringLiteral("demo"));
   EXPECT_NE(header.indexOf(QStringLiteral(
-                "class CalcClient : public QObject, public ddsrpc::ClientBase")),
+                "class CalcClient : public ::QObject, public ::ddsrpc::ClientBase")),
             -1);
   EXPECT_NE(header.indexOf(QStringLiteral("Q_OBJECT")), -1);
   EXPECT_NE(header.indexOf(QStringLiteral("using State = Calc_State;")), -1);
   EXPECT_NE(header.indexOf(QStringLiteral("void calculated(int result);")), -1);
   EXPECT_NE(header.indexOf(QStringLiteral("void readyChanged(bool ready);")), -1);
-  EXPECT_NE(header.indexOf(QStringLiteral("void syncFailed(QString message);")), -1);
-  EXPECT_NE(header.indexOf(QStringLiteral("transport::RetryPolicy request_retry")), -1);
-  EXPECT_NE(header.indexOf(QStringLiteral("std::chrono::milliseconds link_poll_interval{100};")),
+  EXPECT_NE(header.indexOf(QStringLiteral("void syncFailed(::QString message);")), -1);
+  EXPECT_NE(header.indexOf(QStringLiteral("::transport::RetryPolicy request_retry")), -1);
+  EXPECT_NE(header.indexOf(QStringLiteral(
+                "::std::chrono::milliseconds link_poll_interval{100};")),
             -1);
   EXPECT_NE(header.indexOf(QStringLiteral("Options();")), -1);
   EXPECT_NE(header.indexOf(QStringLiteral("~CalcClient() override;")), -1);
-  EXPECT_NE(header.indexOf(QStringLiteral("Coro::Result<void> prepare();")), -1);
-  EXPECT_NE(header.indexOf(QStringLiteral("Coro::Result<void> start();")), -1);
-  EXPECT_NE(header.indexOf(QStringLiteral("Coro::Result<void> stop();")), -1);
+  EXPECT_NE(header.indexOf(QStringLiteral("::Coro::Result<void> prepare();")), -1);
+  EXPECT_NE(header.indexOf(QStringLiteral("::Coro::Result<void> start();")), -1);
+  EXPECT_NE(header.indexOf(QStringLiteral("::Coro::Result<void> stop();")), -1);
+  // The destructor contract is documented and readyChanged/syncFailed are
+  // attributed to both the link-monitor and event fibers.
+  EXPECT_NE(header.indexOf(QStringLiteral("call stop() before destruction")), -1);
+  EXPECT_NE(header.indexOf(QStringLiteral("is defaulted: it neither calls stop()")), -1);
+  EXPECT_NE(header.indexOf(QStringLiteral("link-monitor")), -1);
+  EXPECT_NE(header.indexOf(QStringLiteral("event fiber")), -1);
 
   const QString source = ddsrpcgen::EmitClientSource(file, QStringLiteral("demo"));
   EXPECT_NE(source.indexOf(QStringLiteral("0x0000000000000042ULL")), -1);
   EXPECT_NE(source.indexOf(QStringLiteral("CalcClient::prepare()")), -1);
   EXPECT_NE(source.indexOf(QStringLiteral("CalcClient::~CalcClient() = default;")), -1);
   EXPECT_NE(source.indexOf(QStringLiteral("CalcClient::Options::Options() = default;")), -1);
-  const int subscribe = source.indexOf(QStringLiteral("StartEvents()"));
-  const int monitor = source.indexOf(QStringLiteral("Coro::makeTask"));
+  const int subscribe = source.indexOf(QStringLiteral("this->StartEvents()"));
+  const int monitor = source.indexOf(QStringLiteral("::Coro::makeTask"));
   ASSERT_NE(subscribe, -1);
   ASSERT_NE(monitor, -1);
   EXPECT_LT(subscribe, monitor) << "start() must subscribe before creating the link monitor";
   const int stop = source.indexOf(QStringLiteral("CalcClient::stop()"));
   ASSERT_NE(stop, -1);
   const int cancel = source.indexOf(QStringLiteral("link_monitor_->cancel();"), stop);
-  const int endpoint = source.indexOf(QStringLiteral("StopEndpoint()"), stop);
+  const int endpoint = source.indexOf(QStringLiteral("this->StopEndpoint()"), stop);
   ASSERT_NE(cancel, -1);
   ASSERT_NE(endpoint, -1);
   EXPECT_LT(cancel, endpoint) << "stop() must join the link monitor before StopEndpoint()";
+  EXPECT_NE(source.indexOf(QStringLiteral(
+                "link_monitor_fiber_ == ::boost::this_fiber::get_id()")),
+            -1);
+  EXPECT_NE(source.indexOf(QStringLiteral(
+                "::QMessageLogger(__FILE__, __LINE__, __func__)")),
+            -1);
+  EXPECT_NE(source.indexOf(QStringLiteral("defer it until the callback returns")), -1);
   EXPECT_NE(source.indexOf(QStringLiteral("transport_.CurrentLinkState()")), -1);
-  EXPECT_NE(source.indexOf(QStringLiteral("Coro::delay_for(interval)")), -1);
+  EXPECT_NE(source.indexOf(QStringLiteral("::Coro::delay_for(interval)")), -1);
   EXPECT_NE(source.indexOf(QStringLiteral(
-                "link_monitor_fiber_ == boost::this_fiber::get_id()")),
+                "link_monitor_fiber_ = ::boost::fibers::fiber::id();")),
             -1);
-  EXPECT_NE(source.indexOf(QStringLiteral(
-                "link_monitor_fiber_ = boost::fibers::fiber::id();")),
-            -1);
-  EXPECT_NE(source.indexOf(QStringLiteral("ddsrpc::wire::Begin(out);")), -1);
-  EXPECT_NE(source.indexOf(QStringLiteral("QDataStream in(reply.value());")), -1);
-  EXPECT_NE(source.indexOf(QStringLiteral("ddsrpc::wire::Begin(in);")), -1);
+  EXPECT_NE(source.indexOf(QStringLiteral("::ddsrpc::wire::Begin(out);")), -1);
+  EXPECT_NE(source.indexOf(QStringLiteral("::QDataStream in(reply.value());")), -1);
+  EXPECT_NE(source.indexOf(QStringLiteral("::ddsrpc::wire::Begin(in);")), -1);
   EXPECT_NE(source.indexOf(QStringLiteral("in >> value;")), -1);
-  EXPECT_NE(source.indexOf(QStringLiteral("ddsrpc::RpcErrc::kDecode")), -1);
+  EXPECT_NE(source.indexOf(QStringLiteral("::ddsrpc::RpcErrc::kDecode")), -1);
   EXPECT_NE(source.indexOf(QStringLiteral("Q_EMIT readyChanged(ready);")), -1);
   EXPECT_NE(source.indexOf(QStringLiteral("Q_EMIT syncFailed(message);")), -1);
   EXPECT_NE(source.indexOf(QStringLiteral("out << a;")), -1);
-  EXPECT_NE(source.indexOf(QStringLiteral("auto reply = Call(1, args);")), -1);
-  EXPECT_NE(source.indexOf(QStringLiteral("auto reply = Call(2, args);")), -1);
+  EXPECT_NE(source.indexOf(QStringLiteral("::QByteArray args;")), -1);
+  EXPECT_NE(source.indexOf(QStringLiteral("auto reply = this->Call(1, args);")), -1);
+  EXPECT_NE(source.indexOf(QStringLiteral("auto reply = this->Call(2, args);")), -1);
   EXPECT_NE(source.indexOf(QStringLiteral("in >> count;")), -1);
+}
+
+TEST(CodegenTest, EmitsShadowSafeNamesForHostileParameters) {
+  ddsrpcgen::FileModel file;
+  file.stem = QStringLiteral("hostile");
+  file.schema_hash = 0x7;
+  ddsrpcgen::ClassModel cls;
+  cls.idl_name = QStringLiteral("Hostile");
+  cls.slots = {
+      ddsrpcgen::SlotModel{
+          QStringLiteral("call"),
+          QStringLiteral("demo::Values"),
+          {{QStringLiteral("Call"), QStringLiteral("int"), true},
+           {QStringLiteral("ddsrpc"), QStringLiteral("QByteArray"), true},
+           {QStringLiteral("QDataStream"), QStringLiteral("QString"), true},
+           {QStringLiteral("out"), QStringLiteral("int"), true},
+           {QStringLiteral("in"), QStringLiteral("QByteArray"), true},
+           {QStringLiteral("reply"), QStringLiteral("int"), true}},
+          1},
+      ddsrpcgen::SlotModel{QStringLiteral("vector"),
+                           QStringLiteral("QVector<int>"),
+                           {{QStringLiteral("QVector"), QStringLiteral("int"), true},
+                            {QStringLiteral("items"), QStringLiteral("QVector<int>"), true}},
+                           2},
+  };
+  file.classes = {cls};
+
+  const QString service_h = ddsrpcgen::EmitServiceHeader(file, QStringLiteral("demo"));
+  EXPECT_NE(service_h.indexOf(QStringLiteral(
+                "virtual ::Coro::Result<::demo::Values> call("
+                "int Call, ::QByteArray ddsrpc, ::QString QDataStream, int out, "
+                "::QByteArray in, int reply) = 0;")),
+            -1);
+  EXPECT_NE(service_h.indexOf(QStringLiteral(
+                "::Coro::Result<::QVector<int>> vector(int QVector, "
+                "::QVector<int> items) = 0;")),
+            -1);
+
+  const QString service_src = ddsrpcgen::EmitServiceSource(file, QStringLiteral("demo"));
+  EXPECT_NE(service_src.indexOf(QStringLiteral("int Call{};")), -1);
+  EXPECT_NE(service_src.indexOf(QStringLiteral("::QByteArray ddsrpc{};")), -1);
+  EXPECT_NE(service_src.indexOf(QStringLiteral("::QString QDataStream{};")), -1);
+  EXPECT_NE(service_src.indexOf(QStringLiteral(
+                "this->call(Call, ddsrpc, QDataStream, out, in, reply)")),
+            -1);
+  EXPECT_NE(service_src.indexOf(QStringLiteral(
+                "::QDataStream out_(&payload, ::QIODevice::WriteOnly);")),
+            -1);
+
+  const QString client_h = ddsrpcgen::EmitClientHeader(file, QStringLiteral("demo"));
+  EXPECT_NE(client_h.indexOf(QStringLiteral(
+                "::Coro::Result<::demo::Values> call("
+                "int Call, ::QByteArray ddsrpc, ::QString QDataStream, int out, "
+                "::QByteArray in, int reply);")),
+            -1);
+  EXPECT_NE(client_h.indexOf(QStringLiteral(
+                "::Coro::Result<::QVector<int>> vector(int QVector, "
+                "::QVector<int> items);")),
+            -1);
+
+  const QString client_src = ddsrpcgen::EmitClientSource(file, QStringLiteral("demo"));
+  EXPECT_NE(client_src.indexOf(QStringLiteral(
+                "auto reply_ = this->Call(1, args);")),
+            -1);
+  EXPECT_NE(client_src.indexOf(QStringLiteral(
+                "::QDataStream in_(reply_.value());")),
+            -1);
+  EXPECT_NE(client_src.indexOf(QStringLiteral("::demo::Values value{};")), -1);
+  EXPECT_NE(client_src.indexOf(QStringLiteral("::QVector<int> value{};")), -1);
 }
 
 TEST(CodegenTest, CliGeneratesTypesFileAtomically) {

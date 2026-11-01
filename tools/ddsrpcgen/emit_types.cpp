@@ -4,6 +4,7 @@
 #include <QStringList>
 
 #include "code_writer.h"
+#include "emit_common.h"
 
 namespace ddsrpcgen {
 namespace {
@@ -24,46 +25,15 @@ namespace {
   return sanitized;
 }
 
-// Stems are file names, so they may contain characters that cannot appear in
-// an include guard or helper identifier. Escaping them (rather than replacing
-// every one with '_') keeps "foo-bar" and "foo_bar" from sharing a guard.
-// Lowercase letters are escaped indirectly because raw alphanumerics are
-// uppercased: an escape always contains a lowercase 'x', which a raw part
-// never does.
-[[nodiscard]] QString SanitizedStem(const QString& stem) {
-  QString sanitized;
-  sanitized.reserve(stem.size());
-  for (const QChar c : stem) {
-    if ((c >= QLatin1Char('a') && c <= QLatin1Char('z')) ||
-        (c >= QLatin1Char('A') && c <= QLatin1Char('Z')) ||
-        (c >= QLatin1Char('0') && c <= QLatin1Char('9'))) {
-      sanitized.append(c.toUpper());
-    } else if (c == QLatin1Char('_')) {
-      sanitized.append(QLatin1Char('_'));
-    } else {
-      sanitized += QStringLiteral("_x") +
-                   QString::number(static_cast<uint>(c.unicode()), 16).toUpper() +
-                   QLatin1Char('_');
-    }
-  }
-  if (sanitized.isEmpty()) sanitized = QStringLiteral("TYPES");
-  return sanitized;
+[[nodiscard]] QString StemTag(const QString& stem) {
+  const QString escaped = EscapeStem(stem);
+  return escaped.isEmpty() ? QStringLiteral("TYPES") : escaped;
 }
 
 [[nodiscard]] QString IncludeGuard(const FileModel& file) {
   QString stem = file.stem;
   if (stem.isEmpty()) stem = QFileInfo(file.path).completeBaseName();
-  return QStringLiteral("DDSRPC_GEN_TYPES_") + SanitizedStem(stem) + QStringLiteral("_H");
-}
-
-[[nodiscard]] QStringList NamespaceParts(const QString& name_space) {
-  QStringList parts;
-  const QStringList raw = name_space.split(QStringLiteral("::"), QString::SkipEmptyParts);
-  for (const QString& part : raw) {
-    const QString trimmed = part.trimmed();
-    if (!trimmed.isEmpty()) parts.append(trimmed);
-  }
-  return parts;
+  return QStringLiteral("DDSRPC_GEN_TYPES_") + StemTag(stem) + QStringLiteral("_H");
 }
 
 [[nodiscard]] QString Qualified(const QString& name, const QStringList& parts) {
@@ -394,7 +364,7 @@ QString EmitTypesHeader(const FileModel& file, const QString& name_space) {
     }
     writer.Line();
 
-    const QString file_tag = SanitizedStem(file.stem);
+    const QString file_tag = StemTag(file.stem);
     EmitRegistrationHook(writer, file_tag, namespace_tag, detail_namespace, namespaces,
                          enums, file.pods);
   }

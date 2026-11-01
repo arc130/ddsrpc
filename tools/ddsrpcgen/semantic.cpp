@@ -85,10 +85,14 @@ namespace {
 // methods, or virtual hooks, so they are rejected before emission.
 [[nodiscard]] bool IsReservedMemberName(const QString& name) {
   static const QSet<QString> kReserved = {
-      // Base lifecycle and reflection.
+      // Base lifecycle, generated lifecycle wrappers, and registration.
       QStringLiteral("prepare"),
       QStringLiteral("start"),
       QStringLiteral("stop"),
+      QStringLiteral("Prepare"),
+      QStringLiteral("Start"),
+      QStringLiteral("Stop"),
+      QStringLiteral("registerTypes"),
       QStringLiteral("ready"),
       QStringLiteral("readyChanged"),
       QStringLiteral("syncFailed"),
@@ -178,38 +182,48 @@ namespace {
 // match qint64 on LP64, and wchar_t/char16_t/char32_t/long double have no
 // overload at all. Accepting them would produce generated code that cannot
 // compile, so the semantic layer rejects them with a suggested replacement.
-// The empty string means the builtin is supported.
+// Duplicate or contradictory specifier sequences ("unsigned unsigned int",
+// "signed signed char", "double double", "long short int", ...) are rejected
+// as malformed before they can be emitted. The empty string means the builtin
+// is supported.
 [[nodiscard]] QString UnsupportedBuiltinReason(const QString& spelling) {
   const QStringList words = spelling.split(QLatin1Char(' '), QString::SkipEmptyParts);
+  int sign_words = 0;
   int longs = 0;
   int shorts = 0;
-  bool is_unsigned = false;
-  bool is_signed = false;
-  QString base;
+  QHash<QString, int> base_words;
   for (const QString& word : words) {
     if (word == QStringLiteral("unsigned")) {
-      is_unsigned = true;
+      ++sign_words;
     } else if (word == QStringLiteral("signed")) {
-      is_signed = true;
+      ++sign_words;
     } else if (word == QStringLiteral("long")) {
       ++longs;
     } else if (word == QStringLiteral("short")) {
       ++shorts;
     } else {
-      base = word;
+      ++base_words[word];
     }
   }
-  if (base.isEmpty()) base = QStringLiteral("int");
 
-  const bool has_sign = is_unsigned || is_signed;
   const auto invalid = [&spelling] {
     return QStringLiteral("invalid builtin type spelling '%1'").arg(spelling);
   };
-  if (is_unsigned && is_signed) return invalid();
-  if ((base == QStringLiteral("bool") || base == QStringLiteral("float") ||
-       base == QStringLiteral("void")) &&
-      (has_sign || longs > 0 || shorts > 0)) {
-    return invalid();
+  // Repeated sign/base specifiers and multiple base type names never denote a
+  // valid C++ builtin (and never a QDataStream overload).
+  if (sign_words > 1) return invalid();
+  if (base_words.size() > 1) return invalid();
+  for (auto it = base_words.constBegin(); it != base_words.constEnd(); ++it) {
+    if (it.value() > 1) return invalid();
+  }
+
+  const QString base = base_words.isEmpty() ? QStringLiteral("int")
+                                            : base_words.constBegin().key();
+  const bool has_sign = sign_words > 0;
+  if (base == QStringLiteral("bool") || base == QStringLiteral("float") ||
+      base == QStringLiteral("void")) {
+    if (has_sign || longs > 0 || shorts > 0) return invalid();
+    return {};
   }
   if (base == QStringLiteral("double")) {
     if (longs > 1 || shorts > 0 || has_sign) return invalid();
@@ -221,6 +235,7 @@ namespace {
   }
   if (base == QStringLiteral("wchar_t") || base == QStringLiteral("char16_t") ||
       base == QStringLiteral("char32_t")) {
+    if (has_sign || longs > 0 || shorts > 0) return invalid();
     return QStringLiteral(
                "builtin type '%1' is not supported by QDataStream; use an integer type "
                "or QString")
@@ -228,7 +243,7 @@ namespace {
   }
   if (base == QStringLiteral("char")) {
     if (longs > 0 || shorts > 0) return invalid();
-    if (!is_unsigned && !is_signed) {
+    if (!has_sign) {
       return QStringLiteral(
                  "builtin type 'char' is not supported by QDataStream because its "
                  "signedness is platform-dependent; use 'signed char' or 'unsigned char'");

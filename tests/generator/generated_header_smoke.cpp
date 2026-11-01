@@ -31,6 +31,36 @@ class BuiltinSmokeService final : public ddsrpc_smoke::BuiltinApiService {
   Coro::Result<QVector<int>> values(QVector<int> input) override {
     return input;
   }
+  Coro::Result<int> hostileNames(int ddsrpc, int QByteArray, int QDataStream,
+                                 int Coro, int QString, int Call, int transport,
+                                 int std, int boost) override {
+    return ddsrpc + QByteArray + QDataStream + Coro + QString + Call + transport +
+           std + boost;
+  }
+  // The second parameter's type must survive a parameter named QByteArray.
+  Coro::Result<::QByteArray> shadowedBlob(int QByteArray,
+                                          ::QByteArray payload) override {
+    (void)QByteArray;
+    return payload;
+  }
+  Coro::Result<::QString> shadowedText(int QString, ::QString label) override {
+    (void)QString;
+    return label;
+  }
+  Coro::Result<::QVector<int>> shadowedVector(int QVector,
+                                              ::QVector<int> items) override {
+    (void)QVector;
+    return items;
+  }
+  Coro::Result<::ddsrpc_smoke::BuiltinValues> namespaceShadow(
+      int ddsrpc_smoke, ::ddsrpc_smoke::BuiltinValues value) override {
+    (void)ddsrpc_smoke;
+    return value;
+  }
+  Coro::Result<int> locals(int result, int payload, int out, int reply,
+                           int in, int value) override {
+    return result + payload + out + reply + in + value;
+  }
 };
 
 }  // namespace

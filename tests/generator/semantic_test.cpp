@@ -194,7 +194,7 @@ TEST(SemanticTest, ResolvesMultiwordBuiltinsFromSpelling) {
   EXPECT_EQ(cls.slots[2].params[2].cpp_type, QStringLiteral("unsigned short"));
 }
 
-TEST(SemanticTest, RejectsQDataStreamUnsupportedBuiltins) {
+TEST(SemanticTest, RejectsQDataStreamUnsupportedBuiltinsInEveryTypePosition) {
   QTemporaryDir tmp;
   ASSERT_TRUE(tmp.isValid());
   const QStringList types = {
@@ -204,33 +204,135 @@ TEST(SemanticTest, RejectsQDataStreamUnsupportedBuiltins) {
       QStringLiteral("long double"),    QStringLiteral("QVector<long>"),
       QStringLiteral("QList<char>"),
   };
-  for (int index = 0; index < types.size(); ++index) {
-    const QString& type = types.at(index);
-    const auto result = AnalyzeText(
-        tmp.path(), QStringLiteral("unsupported_%1.idl").arg(index),
-        QStringLiteral("class C { SLOT(void use(%1 value)) }\n").arg(type).toUtf8());
-    EXPECT_FALSE(result.model.has_value()) << type.toStdString();
-    EXPECT_NE(result.diagnostics.indexOf(QStringLiteral("QDataStream")), -1)
-        << type.toStdString() << ": " << result.diagnostics.toStdString();
+  const QStringList declarations = {
+      QStringLiteral("class C { SLOT(%1 result()) }\n"),
+      QStringLiteral("class C { SLOT(void use(%1 value)) }\n"),
+      QStringLiteral("class C { PROP(%1 value) }\n"),
+      QStringLiteral("POD P(%1 field)\nclass C { }\n"),
+  };
+  int file_index = 0;
+  for (const QString& type : types) {
+    for (const QString& declaration : declarations) {
+      const auto result = AnalyzeText(
+          tmp.path(), QStringLiteral("unsupported_%1.idl").arg(file_index++),
+          declaration.arg(type).toUtf8());
+      EXPECT_FALSE(result.model.has_value()) << type.toStdString();
+      EXPECT_NE(result.diagnostics.indexOf(QStringLiteral("QDataStream")), -1)
+          << type.toStdString() << " in " << declaration.toStdString() << ": "
+          << result.diagnostics.toStdString();
+    }
   }
 }
 
-TEST(SemanticTest, RejectsInvalidBuiltinSpellings) {
+TEST(SemanticTest, RejectsInvalidBuiltinSpellingsInEveryTypePosition) {
   QTemporaryDir tmp;
   ASSERT_TRUE(tmp.isValid());
   const QStringList types = {
-      QStringLiteral("unsigned double"), QStringLiteral("long float"),
-      QStringLiteral("long short int"),  QStringLiteral("unsigned signed int"),
-      QStringLiteral("long long long"),  QStringLiteral("short char"),
+      QStringLiteral("unsigned unsigned int"),
+      QStringLiteral("signed signed char"),
+      QStringLiteral("signed unsigned int"),
+      QStringLiteral("unsigned signed int"),
+      QStringLiteral("double double"),
+      QStringLiteral("bool bool"),
+      QStringLiteral("void void"),
+      QStringLiteral("int int"),
+      QStringLiteral("short short"),
+      QStringLiteral("char char"),
+      QStringLiteral("wchar_t wchar_t"),
+      QStringLiteral("long long long"),
+      QStringLiteral("unsigned double"),
+      QStringLiteral("signed double"),
+      QStringLiteral("long float"),
+      QStringLiteral("long short int"),
+      QStringLiteral("short char"),
+      QStringLiteral("void int"),
+      QStringLiteral("bool int"),
+      QStringLiteral("long long double"),
+      QStringLiteral("unsigned bool"),
+      QStringLiteral("unsigned short short"),
   };
-  for (int index = 0; index < types.size(); ++index) {
-    const QString& type = types.at(index);
-    const auto result = AnalyzeText(
-        tmp.path(), QStringLiteral("invalid_builtin_%1.idl").arg(index),
-        QStringLiteral("class C { SLOT(void use(%1 value)) }\n").arg(type).toUtf8());
-    EXPECT_FALSE(result.model.has_value()) << type.toStdString();
-    EXPECT_NE(result.diagnostics.indexOf(QStringLiteral("invalid builtin")), -1)
-        << type.toStdString() << ": " << result.diagnostics.toStdString();
+  const QStringList declarations = {
+      QStringLiteral("class C { SLOT(%1 result()) }\n"),
+      QStringLiteral("class C { SLOT(void use(%1 value)) }\n"),
+      QStringLiteral("class C { PROP(%1 value) }\n"),
+      QStringLiteral("POD P(%1 field)\nclass C { }\n"),
+  };
+  int file_index = 0;
+  for (const QString& type : types) {
+    for (const QString& declaration : declarations) {
+      const auto result = AnalyzeText(
+          tmp.path(), QStringLiteral("invalid_builtin_%1.idl").arg(file_index++),
+          declaration.arg(type).toUtf8());
+      EXPECT_FALSE(result.model.has_value())
+          << type.toStdString() << " in " << declaration.toStdString();
+      EXPECT_NE(result.diagnostics.indexOf(QStringLiteral("invalid builtin")), -1)
+          << type.toStdString() << " in " << declaration.toStdString() << ": "
+          << result.diagnostics.toStdString();
+    }
+  }
+}
+
+TEST(SemanticTest, AcceptsStrictlyValidBuiltinSequences) {
+  QTemporaryDir tmp;
+  ASSERT_TRUE(tmp.isValid());
+  const auto result = AnalyzeText(
+      tmp.path(), "valid_builtins.idl",
+      "POD Values(unsigned short int a, signed long long b, short int c, "
+      "long long int d, signed char e, unsigned char f)\n"
+      "class C {\n"
+      "  PROP(long long total = 0)\n"
+      "  SLOT(signed long long tick(unsigned short int amount))\n"
+      "  SLOT(unsigned long long big(signed long long value))\n"
+      "};\n");
+  ASSERT_TRUE(result.model.has_value()) << result.diagnostics.toStdString();
+  const FileModel& file = result.model->files[0];
+  ASSERT_EQ(file.pods.size(), 1);
+  ASSERT_EQ(file.pods[0].fields.size(), 6);
+  EXPECT_EQ(file.pods[0].fields[0].cpp_type, QStringLiteral("unsigned short int"));
+  EXPECT_EQ(file.pods[0].fields[1].cpp_type, QStringLiteral("signed long long"));
+  EXPECT_EQ(file.pods[0].fields[2].cpp_type, QStringLiteral("short int"));
+  EXPECT_EQ(file.pods[0].fields[3].cpp_type, QStringLiteral("long long int"));
+  EXPECT_EQ(file.pods[0].fields[4].cpp_type, QStringLiteral("signed char"));
+  EXPECT_EQ(file.pods[0].fields[5].cpp_type, QStringLiteral("unsigned char"));
+  const ClassModel& cls = file.classes[0];
+  ASSERT_EQ(cls.properties.size(), 1);
+  EXPECT_EQ(cls.properties[0].cpp_type, QStringLiteral("long long"));
+  ASSERT_EQ(cls.slots.size(), 2);
+  EXPECT_EQ(cls.slots[0].return_cpp_type, QStringLiteral("signed long long"));
+  ASSERT_EQ(cls.slots[0].params.size(), 1);
+  EXPECT_EQ(cls.slots[0].params[0].cpp_type, QStringLiteral("unsigned short int"));
+  EXPECT_EQ(cls.slots[1].return_cpp_type, QStringLiteral("unsigned long long"));
+  ASSERT_EQ(cls.slots[1].params.size(), 1);
+  EXPECT_EQ(cls.slots[1].params[0].cpp_type, QStringLiteral("signed long long"));
+}
+
+TEST(SemanticTest, RejectsGeneratedLifecycleAndRegistrationMemberNames) {
+  QTemporaryDir tmp;
+  ASSERT_TRUE(tmp.isValid());
+  const QStringList names = {
+      QStringLiteral("Prepare"),      QStringLiteral("Start"),
+      QStringLiteral("Stop"),         QStringLiteral("registerTypes"),
+      QStringLiteral("prepare"),      QStringLiteral("start"),
+      QStringLiteral("stop"),
+  };
+  const QStringList declarations = {
+      QStringLiteral("class C { PROP(int %1) }\n"),
+      QStringLiteral("class C { SLOT(void %1()) }\n"),
+      QStringLiteral("class C { ENUM %1 { A } }\n"),
+      QStringLiteral("class C { SIGNAL(%1()) }\n"),
+  };
+  int file_index = 0;
+  for (const QString& name : names) {
+    for (const QString& declaration : declarations) {
+      const auto result = AnalyzeText(
+          tmp.path(), QStringLiteral("lifecycle_name_%1.idl").arg(file_index++),
+          declaration.arg(name).toUtf8());
+      EXPECT_FALSE(result.model.has_value())
+          << name.toStdString() << " in " << declaration.toStdString();
+      EXPECT_NE(result.diagnostics.indexOf(name), -1)
+          << name.toStdString() << " in " << declaration.toStdString() << ": "
+          << result.diagnostics.toStdString();
+    }
   }
 }
 
