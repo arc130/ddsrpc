@@ -1,33 +1,33 @@
-# 代码生成后的项目示例
+# 使用已生成代码的项目示例
 
-本目录展示 `ddsrpcgen` 生成之后，一个消费方工程如何组织、编译和使用生成代码。
-`generated/` 下的文件已经提交到仓库，**构建本示例不需要运行生成器**。
+这个目录演示 `ddsrpcgen` 生成代码之后，使用方项目应该怎样组织、编译和调用生成出来的类。
+`generated/` 下的文件已经提交到仓库，**构建时不需要再次运行生成器**。
 
-示例用一个进程内的 `FakeDdsProvider`，因此不要求安装 Fast DDS；服务端和客户端
-仍按真实的 DDS 注册、请求-响应、发布-订阅和属性同步路径运行。
+示例使用进程内的 `FakeDdsProvider`，不要求安装 Fast DDS。不过服务端和客户端仍然走真实的
+DDS 注册、请求-响应、发布-订阅和属性同步流程。
 
 ## 目录结构
 
 ```text
 examples/generated_project/
 ├── greeter.idl                          # 生成输入
-├── generated/                           # 已提交的生成结果
+├── generated/                           # 已经提交的生成文件
 │   ├── greeter.ddsrpc.types.h
 │   ├── greeter.ddsrpc.service.h
 │   ├── greeter.ddsrpc.service.cpp
 │   ├── greeter.ddsrpc.client.h
 │   └── greeter.ddsrpc.client.cpp
 ├── main.cpp                             # 业务实现：派生 Service、使用 Client
-├── CMakeLists.txt                       # 独立构建，也可被根 examples 引用
+├── CMakeLists.txt                       # 独立构建，也可以被根 examples 引用
 └── README.md
 ```
 
-`main.cpp` 不直接构造 `transport::Message`，只使用生成的
-`demo::GreeterService` 和 `demo::GreeterClient`。
+`main.cpp` 不直接构造 `transport::Message`，只使用生成的 `demo::GreeterService` 和
+`demo::GreeterClient`。
 
 ## 构建与运行
 
-### 作为 ddsrpc 仓库的一部分
+### 在 ddsrpc 仓库中构建
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DDDSRPC_BUILD_EXAMPLES=ON
@@ -35,9 +35,9 @@ cmake --build build --target generated_project_demo -j
 ./build/bin/generated_project_demo
 ```
 
-### 独立构建本目录
+### 单独构建这个目录
 
-`CMakeLists.txt` 在检测不到 `ddsrpc::runtime` 时会把仓库根目录作为父项目加入：
+`CMakeLists.txt` 检测不到 `ddsrpc::runtime` 时，会把仓库根目录作为父项目加入：
 
 ```bash
 cmake -S examples/generated_project -B build-generated-project
@@ -56,12 +56,12 @@ generated-project announced=1
 generated-project label=demo
 ```
 
-这个输出同时演示了：客户端先启动、服务端后启动时 `ready` 从 false 变 true；
-SLOT 请求-响应、PROP 变化推送和 SIGNAL 发布订阅都通过生成的门面完成。
+这段输出演示了以下过程：客户端先启动、服务端后启动，`ready` 从 false 变为 true；SLOT 调用、
+PROP 推送和 SIGNAL 订阅都通过生成的接口完成。
 
-## 从 IDL 重新生成
+## 重新生成代码
 
-`greeter.idl`：
+`greeter.idl` 的内容如下：
 
 ```text
 class Greeter {
@@ -73,25 +73,25 @@ class Greeter {
 };
 ```
 
-构建生成器后重新生成已提交的代码：
+构建好生成器后，可以重新生成已经提交的代码：
 
 ```bash
-# 任选其一：已在 PATH 中，或使用仓库构建产物
+# 任选一种：生成器已经在 PATH 中，或者直接使用仓库的构建产物
 ddsrpcgen --role all --out-dir examples/generated_project/generated \
   --namespace demo --depfile /tmp/greeter.d \
   examples/generated_project/greeter.idl
 ```
 
-生成物含义：
+生成文件说明：
 
 | 文件 | 内容 |
 |---|---|
-| `greeter.ddsrpc.types.h` | POD/枚举的 QDataStream 支持和类型注册函数；本 IDL 没有自定义类型，因此只含注册入口 |
-| `greeter.ddsrpc.service.h/.cpp` | 抽象 `demo::GreeterService`、SLOT 分发、属性状态/快照、SIGNAL 发布 |
-| `greeter.ddsrpc.client.h/.cpp` | `demo::GreeterClient`（QObject）、协程 RPC、属性缓存、Qt 信号、链路监控 |
+| `greeter.ddsrpc.types.h` | POD、枚举的 QDataStream 支持和类型注册函数；这个 IDL 没有自定义类型，所以只包含注册入口 |
+| `greeter.ddsrpc.service.h/.cpp` | 抽象 `demo::GreeterService`、SLOT 分发、属性状态和快照、SIGNAL 发布 |
+| `greeter.ddsrpc.client.h/.cpp` | `demo::GreeterClient`（QObject）、协程 RPC、属性缓存、Qt 信号和链路监控 |
 
-注意：重新生成会覆盖 `generated/` 下的文件；需要长期手改时请修改生成器，或复制到
-自己的源码目录并停止重新生成。
+注意：重新生成会覆盖 `generated/` 下的文件。如果需要长期手动修改，应该修改生成器，或者把生成
+文件复制到自己的源码目录，不再执行上面的命令。
 
 ## 生成代码的用法
 
@@ -109,37 +109,36 @@ class DemoGreeterService final : public demo::GreeterService {
     return QStringLiteral("hello ") + name;
   }
   Coro::Result<void> bump() override {
-    return {};  // 可在这里调用 setCount()/publishAnnounced()
+    return {};  // 可以在这里调用 setCount() 或 publishAnnounced()
   }
 };
 ```
 
-除了纯虚 SLOT，`GreeterService` 还提供：
+除了纯虚函数，`GreeterService` 还提供：
 
-- `count()` / `setCount()`、`label()` / `setLabel()`：属性读取和变更；`setCount` 会更新
-  revision 并推送属性事件；
+- `count()` / `setCount()`、`label()` / `setLabel()`：读取和修改属性，`setCount()` 会更新 revision
+  并推送属性事件；
 - `publishAnnounced(int)`：发布 `SIGNAL`；
-- `prepare()` / `start()` / `stop()`：服务生命周期。
+- `prepare()` / `start()` / `stop()`：管理服务生命周期。
 
-`PROP` 修饰符决定生成哪些方法。本示例中 `count` 是默认可推送属性，客户端获得
-`count()` 和 `pushCount()`；`label` 是 `READONLY`，客户端只有 `label()`，服务端仍有
-`setLabel()`。
+`PROP` 的修饰符决定生成哪些方法。本示例中 `count` 使用默认修饰符，客户端可以调用 `count()` 和
+`pushCount()`；`label` 是 `READONLY`，客户端只能调用 `label()`，服务端仍然可以调用 `setLabel()`。
 
-### 2. 构造和启动客户端
+### 2. 创建并启动客户端
 
 ```cpp
 transport::DdsNode client_node(client_transport,
                                std::make_unique<transport::DdsCodec>());
 demo::GreeterClient client(client_node, client_transport);
 
-client.prepare();        // 必须在 node.Start() 之前
+client.prepare();        // 必须在 node.Start() 之前调用
 client_node.Start();
-client.start();          // 不要求服务端已在线
+client.start();          // 不要求服务端已经在线
 ```
 
-客户端构造需要 `DdsNode&` 和构造该 node 所用的同一个 `DdsTransport&`，且 transport
-必须比 client 活得久。生成的链路监控直接调用
-`transport_.CurrentLinkState()`，用于首次握手和断线重连后的自动属性刷新。
+客户端构造函数需要 `DdsNode&` 和创建该 node 时使用的同一个 `DdsTransport&`，并且 transport 的
+生命周期必须长于 client。生成的链路监控会直接调用 `transport_.CurrentLinkState()`，用来完成首次
+握手和断线重连后的属性刷新。
 
 ### 3. 连接 Qt 信号
 
@@ -150,8 +149,8 @@ QObject::connect(&client, &demo::GreeterClient::countChanged,
                  [](int value) { /* PROP 远端变化 */ });
 ```
 
-生成的客户端信号还包括 `labelChanged`、`readyChanged`、`syncFailed`。属性回调运行在
-事件 fiber 上；不要在回调中调用 `client.stop()`，应推迟到下一次 Qt 事件循环。
+生成的客户端还提供 `labelChanged`、`readyChanged` 和 `syncFailed` 信号。属性相关的回调在事件
+协程中执行；不要在回调中调用 `client.stop()`，应把停止操作推迟到下一次 Qt 事件循环。
 
 ### 4. 调用 SLOT
 
@@ -162,8 +161,8 @@ if (!greeting) {
 }
 ```
 
-每个 SLOT 都生成一个返回 `Coro::Result<T>` 的成员函数，必须在 fiber 中调用。
-服务端请求处理在独立协程中执行，不同请求可以并发。
+每个 `SLOT` 都会生成一个返回 `Coro::Result<T>` 的成员函数，必须在协程中调用。服务端会为每个
+请求启动独立协程，所以多个请求可以同时处理。
 
 ### 5. 停止
 
@@ -180,15 +179,15 @@ server_transport.Close();
 server_transport.WaitClosed();
 ```
 
-生成的 Client 析构函数是 `= default`，不会自动 join fiber 或调用虚函数，因此运行中的
-client 必须在销毁前显式 `stop()`。
+Client 的析构函数是默认实现，不会自动 join 协程，也不会调用虚函数。因此，正在运行的 client
+必须在销毁前显式调用 `stop()`。
 
-## CMake 接入方式
+## CMake 接入
 
 ### 方式 A：提交生成代码（本示例）
 
 ```cmake
-set(CMAKE_AUTOMOC ON)  # client.h 含 Q_OBJECT
+set(CMAKE_AUTOMOC ON)  # client.h 包含 Q_OBJECT
 
 add_executable(my_app
   main.cpp
@@ -199,12 +198,12 @@ target_link_libraries(my_app PRIVATE
   Qt5::Core Qt5::Network Qt5::SerialPort ddsrpc::runtime)
 ```
 
-`ddsrpc::runtime` 需要由父工程提供（`add_subdirectory(ddsrpc)`），当前仓库没有提供
-安装/`find_package` 包。
+`ddsrpc::runtime` 需要由上层工程提供（例如 `add_subdirectory(ddsrpc)`）。当前仓库还没有提供
+安装目标或 `find_package` 包。
 
-### 方式 B：构建时生成（推荐保持 IDL 与代码同步）
+### 方式 B：构建时生成（推荐）
 
-使用根 README 中的 `ddsrpc_add_idl`，由 CMake 在构建阶段调用 `ddsrpcgen`：
+使用根目录 README 中的 `ddsrpc_add_idl`，让 CMake 在构建阶段调用 `ddsrpcgen`：
 
 ```cmake
 ddsrpc_add_idl(my_app
@@ -213,14 +212,13 @@ ddsrpc_add_idl(my_app
   IDL "${CMAKE_CURRENT_SOURCE_DIR}/greeter.idl")
 ```
 
-这种方式不需要提交 `generated/`，但要求构建环境能找到 `ddsrpcgen` 和本仓库的
-CMake helper。
+这种方式不需要提交 `generated/`，但要求构建环境能找到 `ddsrpcgen` 和本仓库的 CMake helper。
 
-## 与完整工程示例的关系
+## 与其他示例的关系
 
 - `examples/hello`：使用 `ddsrpc_add_idl` 在构建时生成代码；
-- `examples/generated_project`（本目录）：展示生成结果已存在时的工程结构与 API 用法；
-- `examples/qmake_hello`：qmake 工程消费预生成代码；
-- `examples/fastdds_check` / `fastdds_reconnect`：真实 Fast DDS 跨进程验证。
+- `examples/generated_project`（本目录）：展示生成文件已经存在时，项目结构和 API 应该怎样使用；
+- `examples/qmake_hello`：qmake 工程使用预生成的代码；
+- `examples/fastdds_check` 和 `examples/fastdds_reconnect`：真实 Fast DDS 跨进程验证。
 
-完整 IDL 子集、属性修饰符和协议细节见仓库根目录 `README.md`。
+完整的 IDL 子集、属性修饰符和协议细节见仓库根目录的 `README.md`。
