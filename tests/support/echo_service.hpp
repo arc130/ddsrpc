@@ -24,6 +24,11 @@ class EchoService final : public ddsrpc::ServiceBase {
     }
     QString text;
     in >> text;
+    if (in.status() != QDataStream::Ok) {
+      return ddsrpc::OperationResult::Failure(
+          ddsrpc::make_error_code(ddsrpc::RpcErrc::kDecode),
+          QStringLiteral("echo: failed to decode arguments"));
+    }
     QByteArray payload;
     QDataStream out(&payload, QIODevice::WriteOnly);
     out << text;

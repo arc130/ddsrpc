@@ -291,4 +291,10 @@ transport.Close(); transport.WaitClosed()
 - `ddsrpcgen_tests`：lexer/parser/import/semantic/types/CLI；
 - `ddsrpc_generated_compile_check`：生成 types/service/client 的编译/链接 smoke，覆盖 hostile 参数名；
 - `ddsrpc_runtime_tests`：wire、TaskGroup、ServiceBase、ClientBase、RPC、SIGNAL、PROP、
-  client-first 握手和服务重启自动刷新端到端测试。
+  client-first 握手和服务重启自动刷新端到端测试；
+- 其中 `StabilityTest.*` 覆盖高频并发与错误输入：512 路并发 RPC、混合非法请求、随机字节
+  请求、异常 handler、属性/SIGNAL 突发、恶意回复、损坏事件载荷。单独运行：
+
+  ```bash
+  ./build/bin/ddsrpc_runtime_tests --gtest_filter='StabilityTest.*'
+  ```

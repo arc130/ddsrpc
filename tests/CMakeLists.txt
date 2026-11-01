@@ -25,6 +25,7 @@ add_executable(ddsrpc_runtime_tests
   runtime/task_group_test.cpp
   runtime/service_base_test.cpp
   runtime/client_base_test.cpp
+  runtime/stability_test.cpp
   runtime/e2e_rpc_test.cpp
   runtime/e2e_signal_test.cpp
   runtime/e2e_property_test.cpp
