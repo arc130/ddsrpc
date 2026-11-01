@@ -1,2 +1,4 @@
 # Shell scripts must stay LF so they run under WSL regardless of Windows checkout settings.
 *.sh text eol=lf
+# IDL inputs are LF so generated output and schema hashing are deterministic across checkouts.
+*.idl text eol=lf
