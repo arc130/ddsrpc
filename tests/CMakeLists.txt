@@ -27,6 +27,7 @@ add_executable(ddsrpc_runtime_tests
   runtime/client_base_test.cpp
   runtime/e2e_rpc_test.cpp
   runtime/e2e_signal_test.cpp
+  runtime/e2e_property_test.cpp
 )
 # AsyncTask 头文件来自根级 ${DDSRPC_ASYNCTASK_DIR}（即 transport 实际链接的
 # d231d64 子模块）；Transport 自带的 third_party/AsyncTask 在本工作树未检出。
@@ -42,7 +43,8 @@ ddsrpc_add_idl(ddsrpc_runtime_tests
   NAMESPACE testgen
   IDL
     "${CMAKE_CURRENT_SOURCE_DIR}/idl/echo.idl"
-    "${CMAKE_CURRENT_SOURCE_DIR}/idl/calculator.idl")
+    "${CMAKE_CURRENT_SOURCE_DIR}/idl/calculator.idl"
+  INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/idl")
 target_link_libraries(ddsrpc_runtime_tests PRIVATE
   ddsrpc_runtime GTest::gtest Qt5::Core Qt5::Network)
 add_test(NAME ddsrpc_runtime_tests COMMAND ddsrpc_runtime_tests)

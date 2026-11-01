@@ -1,0 +1,3 @@
+POD Point(int x, int y)
+
+ENUM Mode { Idle, Running }

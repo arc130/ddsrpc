@@ -1,4 +1,10 @@
+IMPORT "common.idl";
+
 class Calculator {
+    PROP(int total = 0)
+    PROP(QString name READONLY)
+    PROP(Mode mode = Idle READWRITE)
+
     SIGNAL(calculated(int result))
 
     SLOT(int add(int a, int b))

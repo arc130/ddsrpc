@@ -95,6 +95,9 @@ class ClientBase {
                                 QDataStream& in) = 0;
   virtual void EmitReadyChanged(bool ready) = 0;
   virtual void EmitSyncFailed(const QString& message) = 0;
+  /// 在释放 `refresh_mutex_` 之后由 ClientBase 调用；生成代码在此发出在
+  /// ApplyPropertySnapshot 期间暂存的 `<prop>Changed` 信号。
+  virtual void EmitPendingPropertyChanges() = 0;
 
  private:
   /// 一次状态转换中累积的通知，在释放 `refresh_mutex_` 之后统一发射。

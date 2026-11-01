@@ -214,6 +214,8 @@ class BareClient : public ddsrpc::ClientBase {
     sync_failures.push_back(message);
     if (refresh_on_sync_failed) TryNestedRefresh();
   }
+
+  void EmitPendingPropertyChanges() override {}
 };
 
 struct EchoEnv {

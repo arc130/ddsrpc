@@ -136,6 +136,7 @@ Coro::Result<void> ClientBase::HandleLinkState(transport::LinkState state) {
       SetReadyLocked(false, pending);
     }
     EmitNotifications(pending);
+    EmitPendingPropertyChanges();
     return {};
   }
 
@@ -148,6 +149,7 @@ Coro::Result<void> ClientBase::HandleLinkState(transport::LinkState state) {
       if (!ready_.load() && !sync_blocked_) result = SyncOnce(pending);
       lock.unlock();
       EmitNotifications(pending);
+    EmitPendingPropertyChanges();
       return result;
     }
   }
@@ -162,6 +164,7 @@ Coro::Result<void> ClientBase::HandleLinkState(transport::LinkState state) {
       SetReadyLocked(false, pending);
     }
     EmitNotifications(pending);
+    EmitPendingPropertyChanges();
     return renewed.error();
   }
 
@@ -175,6 +178,7 @@ Coro::Result<void> ClientBase::HandleLinkState(transport::LinkState state) {
     if (!ready_.load() && !sync_blocked_) result = SyncOnce(pending);
   }
   EmitNotifications(pending);
+  EmitPendingPropertyChanges();
   return result;
 }
 
@@ -198,6 +202,7 @@ Coro::Result<void> ClientBase::StopEndpoint() {
     SetReadyLocked(false, pending);
   }
   EmitNotifications(pending);
+  EmitPendingPropertyChanges();
   return {};
 }
 
@@ -280,6 +285,7 @@ Coro::Result<void> ClientBase::refreshProperties() {
     }
   }
   EmitNotifications(pending);
+  EmitPendingPropertyChanges();
   return result;
 }
 

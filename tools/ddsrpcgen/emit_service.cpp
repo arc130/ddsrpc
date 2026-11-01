@@ -125,6 +125,16 @@ void EmitClassHeader(CodeWriter& writer, const ClassModel& cls,
                 QLatin1Char('(') + Parameters(signal.params) + QStringLiteral(");"));
   }
   if (!cls.signals.isEmpty()) writer.Line();
+  for (const PropertyModel& property : cls.properties) {
+    const QString type = QualifiedCppType(property.cpp_type);
+    writer.Line(type + QLatin1Char(' ') + property.name +
+                QStringLiteral("() const;"));
+    if (property.modifier != PropModifier::kConstant) {
+      writer.Line(QStringLiteral("::Coro::Result<void> set") + Capitalize(property.name) +
+                  QLatin1Char('(') + type + QStringLiteral(" value);"));
+    }
+  }
+  if (!cls.properties.isEmpty()) writer.Line();
   writer.Dedent();
   writer.Line(QStringLiteral("protected:"));
   writer.Indent();
@@ -133,6 +143,25 @@ void EmitClassHeader(CodeWriter& writer, const ClassModel& cls,
   writer.Line(QStringLiteral(
       "::ddsrpc::OperationResult BuildPropertySnapshot() override;"));
   writer.Dedent();
+  if (!cls.properties.isEmpty()) {
+    writer.Line(QStringLiteral("private:"));
+    writer.Indent();
+    for (const PropertyModel& property : cls.properties) {
+      const QString type = QualifiedCppType(property.cpp_type);
+      const QString initial =
+          property.has_default ? property.default_value : QStringLiteral("{}");
+      writer.Line(type + QLatin1Char(' ') + property.name + QLatin1Char('_') +
+                  QStringLiteral(" = ") + initial + QLatin1Char(';'));
+      writer.Line(QStringLiteral("::quint64 ") + property.name +
+                  QStringLiteral("_revision_ = 0;"));
+      if (property.modifier != PropModifier::kConstant) {
+        writer.Line(QStringLiteral("::Coro::Result<::quint64> ") +
+                    QStringLiteral("ddsrpc_set_") + property.name + QLatin1Char('(') +
+                    type + QStringLiteral(" value);"));
+      }
+    }
+    writer.Dedent();
+  }
   writer.Line(QStringLiteral("};"));
 }
 
@@ -252,6 +281,9 @@ void EmitConstructor(CodeWriter& writer, const FileModel& file, const ClassModel
   writer.Line(QStringLiteral("}"));
 }
 
+void EmitPropertySetCase(CodeWriter& writer, const ClassModel& cls,
+                         const PropertyModel& property, const QString& stream);
+
 void EmitHandleOperation(CodeWriter& writer, const ClassModel& cls) {
   QSet<QString> used = AllParamNames(cls);
   QString stream = QStringLiteral("args");
@@ -265,6 +297,11 @@ void EmitHandleOperation(CodeWriter& writer, const ClassModel& cls) {
   writer.Line(QStringLiteral("switch (op) {"));
   writer.Indent();
   for (const SlotModel& slot : cls.slots) EmitSlotCase(writer, cls, slot, stream);
+  for (const PropertyModel& property : cls.properties) {
+    if (property.remote_setter_op > 0) {
+      EmitPropertySetCase(writer, cls, property, stream);
+    }
+  }
   writer.Line(QStringLiteral("default:"));
   writer.Indent();
   writer.Line(QStringLiteral("return ::ddsrpc::OperationResult::Failure("));
@@ -315,6 +352,99 @@ void EmitSignalPublish(CodeWriter& writer, const ClassModel& cls,
   writer.Line(QStringLiteral("}"));
 }
 
+void EmitPropertySetCase(CodeWriter& writer, const ClassModel& cls,
+                         const PropertyModel& property, const QString& stream) {
+  const QString type = QualifiedCppType(property.cpp_type);
+  const QString context = cls.idl_name + QStringLiteral("::") + property.name;
+  writer.Line(QStringLiteral("case ") + QString::number(property.remote_setter_op) +
+              QStringLiteral(": {"));
+  writer.Indent();
+  writer.Line(type + QStringLiteral(" ddsrpc_value{};"));
+  writer.Line(stream + QStringLiteral(" >> ddsrpc_value;"));
+  writer.Line(QStringLiteral("if (") + stream +
+              QStringLiteral(".status() != ::QDataStream::Ok) {"));
+  writer.Indent();
+  EmitFailureReturn(
+      writer, QStringLiteral("::ddsrpc::make_error_code(::ddsrpc::RpcErrc::kDecode)"),
+      context + QStringLiteral(": failed to decode the property value"));
+  writer.Dedent();
+  writer.Line(QStringLiteral("}"));
+  writer.Line(QStringLiteral("const auto ddsrpc_revision = this->ddsrpc_set_") +
+              property.name + QStringLiteral("(ddsrpc_value);"));
+  writer.Line(QStringLiteral("if (!ddsrpc_revision) {"));
+  writer.Indent();
+  writer.Line(QStringLiteral("return ::ddsrpc::OperationResult::Failure("));
+  writer.Indent();
+  writer.Line(QStringLiteral("ddsrpc_revision.error(),"));
+  writer.Line(QStringLiteral("::QString::fromStdString(ddsrpc_revision.error().message()));"));
+  writer.Dedent();
+  writer.Dedent();
+  writer.Line(QStringLiteral("}"));
+  writer.Line(QStringLiteral("::QByteArray ddsrpc_reply_payload;"));
+  writer.Line(QStringLiteral("::QDataStream ddsrpc_reply_out(&ddsrpc_reply_payload, "
+                             "::QIODevice::WriteOnly);"));
+  writer.Line(QStringLiteral("::ddsrpc::wire::Begin(ddsrpc_reply_out);"));
+  writer.Line(QStringLiteral("ddsrpc_reply_out << ddsrpc_revision.value() << ddsrpc_value;"));
+  writer.Line(QStringLiteral("if (ddsrpc_reply_out.status() != ::QDataStream::Ok) {"));
+  writer.Indent();
+  EmitFailureReturn(
+      writer, QStringLiteral("::ddsrpc::make_error_code(::ddsrpc::RpcErrc::kEncode)"),
+      context + QStringLiteral(": failed to encode the property reply"));
+  writer.Dedent();
+  writer.Line(QStringLiteral("}"));
+  writer.Line(QStringLiteral("return ::ddsrpc::OperationResult::Success(ddsrpc_reply_payload);"));
+  writer.Dedent();
+  writer.Line(QStringLiteral("}"));
+}
+
+void EmitPropertyAccessors(CodeWriter& writer, const ClassModel& cls) {
+  for (const PropertyModel& property : cls.properties) {
+    const QString type = QualifiedCppType(property.cpp_type);
+    writer.Line(type + QLatin1Char(' ') + cls.idl_name + QStringLiteral("Service::") +
+                property.name + QStringLiteral("() const { return ") + property.name +
+                QStringLiteral("_; }"));
+    writer.Line();
+    if (property.modifier == PropModifier::kConstant) continue;
+    writer.Line(QStringLiteral("::Coro::Result<void> ") + cls.idl_name +
+                QStringLiteral("Service::set") + Capitalize(property.name) +
+                QLatin1Char('(') + type + QStringLiteral(" value) {"));
+    writer.Indent();
+    writer.Line(QStringLiteral("const auto revision = this->ddsrpc_set_") +
+                property.name + QStringLiteral("(value);"));
+    writer.Line(QStringLiteral("if (!revision) return revision.error();"));
+    writer.Line(QStringLiteral("return {};"));
+    writer.Dedent();
+    writer.Line(QStringLiteral("}"));
+    writer.Line();
+    writer.Line(QStringLiteral("::Coro::Result<::quint64> ") + cls.idl_name +
+                QStringLiteral("Service::ddsrpc_set_") + property.name +
+                QLatin1Char('(') + type + QStringLiteral(" value) {"));
+    writer.Indent();
+    writer.Line(property.name + QStringLiteral("_ = value;"));
+    writer.Line(QStringLiteral("const auto revision = this->NextRevision();"));
+    writer.Line(property.name + QStringLiteral("_revision_ = revision;"));
+    writer.Line(QStringLiteral("::QByteArray ddsrpc_payload;"));
+    writer.Line(QStringLiteral("::QDataStream ddsrpc_out(&ddsrpc_payload, "
+                               "::QIODevice::WriteOnly);"));
+    writer.Line(QStringLiteral("::ddsrpc::wire::Begin(ddsrpc_out);"));
+    writer.Line(QStringLiteral("ddsrpc_out << value;"));
+    writer.Line(QStringLiteral("if (ddsrpc_out.status() != ::QDataStream::Ok) {"));
+    writer.Indent();
+    writer.Line(QStringLiteral("return ::ddsrpc::make_error_code(::ddsrpc::RpcErrc::kEncode);"));
+    writer.Dedent();
+    writer.Line(QStringLiteral("}"));
+    writer.Line(QStringLiteral("const auto published = this->PublishEvent("
+                               "::ddsrpc::wire::EventKind::kProperty, ") +
+                QString::number(property.property_id) + QStringLiteral(", revision, "
+                "ddsrpc_payload);"));
+    writer.Line(QStringLiteral("if (!published) return published.error();"));
+    writer.Line(QStringLiteral("return revision;"));
+    writer.Dedent();
+    writer.Line(QStringLiteral("}"));
+    writer.Line();
+  }
+}
+
 void EmitBuildPropertySnapshot(CodeWriter& writer, const ClassModel& cls) {
   writer.Line(QStringLiteral("::ddsrpc::OperationResult ") + cls.idl_name +
               QStringLiteral("Service::BuildPropertySnapshot() {"));
@@ -322,7 +452,14 @@ void EmitBuildPropertySnapshot(CodeWriter& writer, const ClassModel& cls) {
   writer.Line(QStringLiteral("::QByteArray payload;"));
   writer.Line(QStringLiteral("::QDataStream out(&payload, ::QIODevice::WriteOnly);"));
   writer.Line(QStringLiteral("::ddsrpc::wire::Begin(out);"));
-  writer.Line(QStringLiteral("out << ::quint32(0);"));
+  writer.Line(QStringLiteral("out << ::quint32(") +
+              QString::number(cls.properties.size()) + QStringLiteral(");"));
+  for (const PropertyModel& property : cls.properties) {
+    writer.Line(QStringLiteral("out << ::quint32(") +
+                QString::number(property.property_id) + QStringLiteral(") << ") +
+                property.name + QStringLiteral("_revision_ << ") + property.name +
+                QStringLiteral("_;"));
+  }
   writer.Line(QStringLiteral("if (out.status() != ::QDataStream::Ok) {"));
   writer.Indent();
   EmitFailureReturn(
@@ -393,6 +530,7 @@ QString EmitServiceSource(const FileModel& file, const QString& name_space) {
     if (!first) writer.Line();
     EmitConstructor(writer, file, cls);
     writer.Line();
+    EmitPropertyAccessors(writer, cls);
     EmitHandleOperation(writer, cls);
     for (const SignalModel& signal : cls.signals) {
       writer.Line();

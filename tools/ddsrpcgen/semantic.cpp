@@ -84,6 +84,7 @@ namespace {
 // names would be hidden by (or collide with) generated state, lifecycle
 // methods, or virtual hooks, so they are rejected before emission.
 [[nodiscard]] bool IsReservedMemberName(const QString& name) {
+  if (name.startsWith(QStringLiteral("ddsrpc_"))) return true;
   static const QSet<QString> kReserved = {
       // Base lifecycle, generated lifecycle wrappers, and registration.
       QStringLiteral("prepare"),
