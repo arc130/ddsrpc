@@ -1,0 +1,6 @@
+class Greeter {
+    PROP(int count = 0)
+    SIGNAL(announced(int count))
+    SLOT(QString greet(QString name))
+    SLOT(void reset())
+};

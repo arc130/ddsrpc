@@ -28,6 +28,7 @@ add_executable(ddsrpc_runtime_tests
   runtime/e2e_rpc_test.cpp
   runtime/e2e_signal_test.cpp
   runtime/e2e_property_test.cpp
+  runtime/e2e_reconnect_test.cpp
 )
 # AsyncTask 头文件来自根级 ${DDSRPC_ASYNCTASK_DIR}（即 transport 实际链接的
 # d231d64 子模块）；Transport 自带的 third_party/AsyncTask 在本工作树未检出。
