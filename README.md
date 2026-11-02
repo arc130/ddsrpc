@@ -233,6 +233,9 @@ Client 的析构函数是默认实现，不会调用 `stop()`、不会 join 协�
 销毁前显式调用 `stop()`。不要在 `readyChanged`、`syncFailed` 或事件回调中调用 `stop()`，应把停止
 操作推迟到下一次 Qt 事件循环。回调中可以安全地调用 `refreshProperties()` 和 RPC。
 
+如果要把 `DdsNode`/`DdsTransport` 换成自己的类，或者用一个 `System` 同时持有 node 和
+transport，参见 [`CUSTOMIZATION.md`](CUSTOMIZATION.md)。
+
 ## CMake 接入
 
 ```cmake
